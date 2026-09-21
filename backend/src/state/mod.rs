@@ -9,6 +9,7 @@ use crate::ai::{
 use crate::config::AppConfig;
 use crate::conversation::ConversationStore;
 use crate::robot::RobotStateMachine;
+use crate::speaker::{SpeakerIdClient, SpeakerStore};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -24,6 +25,8 @@ pub struct AppState {
     /// after construction (it needs `.await`, `new()` doesn't), empty until
     /// then. See `ai::rejection`.
     pub rejection_cache: Arc<RejectionLineCache>,
+    pub speaker_store: Arc<SpeakerStore>,
+    pub speaker_id_client: Arc<SpeakerIdClient>,
 }
 
 impl AppState {
@@ -95,6 +98,27 @@ impl AppState {
 
         let session_idle_timeout_minutes = config.session_idle_timeout_minutes;
 
+        let speaker_store = match SpeakerStore::new(&config.speaker_db_path, config.speaker_match_threshold) {
+            Ok(store) => Arc::new(store),
+            Err(e) => {
+                // Same degrade-don't-crash principle as everything else in
+                // this file: a broken speaker DB must not prevent Jimmy
+                // from starting at all. An in-memory fallback still lets
+                // identification run for the current process lifetime,
+                // just without persistence across restarts.
+                tracing::error!(
+                    "Failed to open speaker DB at {}: {} — using in-memory fallback (no persistence)",
+                    config.speaker_db_path,
+                    e
+                );
+                Arc::new(
+                    SpeakerStore::in_memory(config.speaker_match_threshold)
+                        .expect("in-memory SQLite must always succeed"),
+                )
+            }
+        };
+        let speaker_id_client = Arc::new(SpeakerIdClient::new(config.speaker_id_service_url.clone()));
+
         Self {
             config: Arc::new(RwLock::new(config)),
             state_machine: RobotStateMachine::new(),
@@ -105,6 +129,8 @@ impl AppState {
             tts,
             system_prompt: Arc::new(system_prompt),
             rejection_cache: Arc::new(RejectionLineCache::default()),
+            speaker_store,
+            speaker_id_client,
         }
     }
 

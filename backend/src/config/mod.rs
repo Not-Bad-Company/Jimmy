@@ -28,6 +28,11 @@ pub struct AppConfig {
     pub tts_voice: String,
     pub audio_output_device: String,
 
+    // Speaker identification
+    pub speaker_db_path: String,
+    pub speaker_match_threshold: f32,
+    pub speaker_id_service_url: String,
+
     // Conversation
     /// If more than this many minutes pass with no new message, the next
     /// message starts a fresh conversation (old history is dropped) instead
@@ -80,6 +85,15 @@ impl AppConfig {
             tts_voice: env::var("TTS_VOICE").unwrap_or_else(|_| "bm_george".to_string()),
             audio_output_device: env::var("AUDIO_OUTPUT_DEVICE")
                 .unwrap_or_else(|_| "default".to_string()),
+
+            speaker_db_path: env::var("SPEAKER_DB_PATH")
+                .unwrap_or_else(|_| "data/jimmy.db".to_string()),
+            speaker_match_threshold: env::var("SPEAKER_MATCH_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.75),
+            speaker_id_service_url: env::var("SPEAKER_ID_SERVICE_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:8001/identify".to_string()),
 
             session_idle_timeout_minutes: env::var("SESSION_IDLE_TIMEOUT_MINUTES")
                 .ok()
