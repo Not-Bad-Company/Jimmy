@@ -66,18 +66,21 @@ export class RoboEyes {
   eyeRborderRadiusNext = 8;
 
   // Coordinates
-  spaceBetweenDefault = 10;
-  spaceBetweenCurrent = 10;
-  spaceBetweenNext = 10;
+  // A bit wider than the original 10 — extra breathing room between the
+  // two eyes' glow halos so they read as distinct even at larger eye sizes
+  // (surprised/excited/determined), on top of the halo radius cap above.
+  spaceBetweenDefault = 14;
+  spaceBetweenCurrent = 14;
+  spaceBetweenNext = 14;
 
-  eyeLxDefault = Math.floor((128 - (36 + 10 + 36)) / 2); // 23
+  eyeLxDefault = Math.floor((128 - (36 + 14 + 36)) / 2); // 21
   eyeLyDefault = Math.floor((64 - 36) / 2); // 14
   eyeLx = this.eyeLxDefault;
   eyeLy = this.eyeLyDefault;
   eyeLxNext = this.eyeLxDefault;
   eyeLyNext = this.eyeLyDefault;
 
-  eyeRxDefault = this.eyeLxDefault + 36 + 10; // 69
+  eyeRxDefault = this.eyeLxDefault + 36 + 14; // 71
   eyeRyDefault = this.eyeLyDefault;
   eyeRx = this.eyeRxDefault;
   eyeRy = this.eyeRyDefault;
@@ -133,6 +136,17 @@ export class RoboEyes {
   mouthCurveCurrent = 0;
   mouthCurveNext = 0;
   mouthOpen = false;
+
+  // How open the mouth currently is, 0 (fully closed flat bar) to 1 (fully
+  // open, jaw dropped, dark cavity visible) — driven by live speaking
+  // amplitude (see the speaking block in update()), NOT just a static
+  // per-emotion flag. A mouth that only ever pulses its thickness while
+  // talking never actually looks like it's forming an open/closed shape;
+  // this makes it visibly open on louder syllables and close between
+  // them, which is what "looks like it's actually talking" needs.
+  // `mouthOpen` (surprised/excited) forces this to 1 permanently instead
+  // of animating it.
+  mouthOpenAmount = 0;
 
   // Blinking
   eyeL_open = true;
@@ -626,12 +640,16 @@ export class RoboEyes {
 
       if (this.speakingAmplitudeSmoothed > 0.02) {
         // Real audio amplitude is driving the pulse: eyes widen with
-        // loudness, matching actual speech rhythm.
+        // loudness, matching actual speech rhythm. Width gets a smaller
+        // matching pulse too (in sync, not an independent wobble) — a
+        // height-only bounce reads as one repetitive motion; real talking
+        // has a little horizontal give as well.
         const pulse = this.speakingAmplitudeSmoothed * 10;
         this.eyeLheightNext = Math.max(12, this.eyeLheightDefault + pulse);
         this.eyeRheightNext = Math.max(12, this.eyeRheightDefault + pulse);
-        // Same signal drives the mouth "opening" with loudness.
-        this.mouthHeightNext = this.mouthHeightDefault + this.speakingAmplitudeSmoothed * 6;
+        const widthPulse = this.speakingAmplitudeSmoothed * 3;
+        this.eyeLwidthNext = Math.max(20, this.eyeLwidthDefault + widthPulse);
+        this.eyeRwidthNext = Math.max(20, this.eyeRwidthDefault + widthPulse);
       } else {
         // No amplitude data yet (or a silent gap in speech) — fall back to
         // a gentle sine idle so the eyes don't go dead-still mid-utterance.
@@ -639,11 +657,24 @@ export class RoboEyes {
         const pulse = Math.sin(this.speakingPhase) * 2;
         this.eyeLheightNext = Math.max(12, this.eyeLheightDefault + pulse);
         this.eyeRheightNext = Math.max(12, this.eyeRheightDefault + pulse);
-        this.mouthHeightNext = Math.max(1, this.mouthHeightDefault + pulse * 0.5);
+        this.eyeLwidthNext = this.eyeLwidthDefault;
+        this.eyeRwidthNext = this.eyeRwidthDefault;
       }
+
+      // Mouth openness (0-1: closed flat bar -> fully open with a visible
+      // dark cavity) tracks amplitude directly, fast attack / slower
+      // release so it snaps open on a loud syllable and eases shut between
+      // words instead of looking twitchy. This — not a thickness pulse on
+      // a flat bar — is what makes the mouth actually look like it's
+      // forming words rather than just buzzing.
+      const openTarget = Math.min(1, this.speakingAmplitudeSmoothed * 1.8);
+      const openRate = openTarget > this.mouthOpenAmount ? 0.7 : 0.2;
+      this.mouthOpenAmount += (openTarget - this.mouthOpenAmount) * openRate;
     } else {
       this.speakingAmplitudeSmoothed = 0;
-      this.mouthHeightNext = this.mouthHeightDefault;
+      this.eyeLwidthNext = this.eyeLwidthDefault;
+      this.eyeRwidthNext = this.eyeRwidthDefault;
+      this.mouthOpenAmount *= 0.75; // ease shut rather than snapping closed
     }
 
     // 5. Thinking subtle pulse (overrides the idle breathing baseline while active)
@@ -796,10 +827,25 @@ export class RoboEyes {
     // Soft halo bloom: radial gradient from a bright core fading fully
     // transparent, filled over a square big enough that the fade-out is
     // never visibly clipped.
-    const glowRadius = Math.max(w, h) * 0.7;
+    //
+    // The radius is the shape's own half-size PLUS A CONSTANT bleed
+    // distance — not a flat multiple of the shape size. Two earlier
+    // attempts both got this wrong in opposite directions, confirmed by
+    // actual screenshots each time: a multiplier big enough to bleed
+    // visibly past small eyes (0.7x) bled FAR past large eyes too and
+    // bridged the inter-eye gap, fusing both glows into one blob with the
+    // mouth sitting inside it. Shrinking the multiplier (0.42x) to stop
+    // that fixed large eyes but made the radius smaller than large eyes'
+    // own half-size, hiding the entire halo under the opaque core — no
+    // glow at all on surprised/excited/determined. A constant bleed keeps
+    // the visible glow amount consistent across every eye size, and stays
+    // well under half the 14px eye gap regardless of eye size.
+    const halfDiag = Math.max(w, h) / 2;
+    const glowBleed = 6;
+    const glowRadius = halfDiag + glowBleed;
     const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowRadius);
-    gradient.addColorStop(0, 'rgba(255, 255, 255, 0.45)');
-    gradient.addColorStop(0.5, 'rgba(255, 255, 255, 0.15)');
+    gradient.addColorStop(0, 'rgba(255, 255, 255, 0.42)');
+    gradient.addColorStop(0.55, 'rgba(255, 255, 255, 0.1)');
     gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
     ctx.save();
     ctx.fillStyle = gradient;
@@ -1018,33 +1064,73 @@ export class RoboEyes {
     // the fixed reserved-band math instead left a large, visibly
     // disconnected gap whenever the eyes' actual size/position (which
     // varies a lot by emotion — 10px tall for sleepy, 46px for surprised)
-    // didn't match that fixed number. `mouthOpen` swaps in a small rounded
-    // square (surprised/excited) instead of the usual curved bar.
+    // didn't match that fixed number.
+    //
+    // `openAmt` (0-1) unifies two sources: `mouthOpen` (surprised/excited)
+    // forces it permanently open, otherwise it's `mouthOpenAmount`, driven
+    // live by speaking amplitude (see update()). A mouth that only pulsed
+    // its thickness while talking never actually looked like it opened and
+    // closed — this makes the jaw visibly drop on louder syllables, with a
+    // dark interior cavity once open enough to read as a mouth rather than
+    // just a taller bar, and eases back to the closed curved bar (smile/
+    // frown) between words.
     const mw = Math.max(1, Math.round(this.mouthWidthCurrent));
-    const mh = Math.max(1, Math.round(this.mouthHeightCurrent));
+    const baseMh = Math.max(1, Math.round(this.mouthHeightCurrent));
     const mx = Math.round((this.screenWidth - mw) / 2);
+    const openAmt = this.mouthOpen ? 1 : this.mouthOpenAmount;
     const mouthGap = 4;
     const eyesBottomAvg = (ly + lh + ry + rh) / 2;
-    // Clamp against the canvas edge: eye height varies hugely by emotion
-    // (surprised can push the eye bottom near the edge already), and the
-    // speaking pulse can add a few px to mh on top of that.
-    const my = Math.min(Math.round(eyesBottomAvg) + mouthGap, this.screenHeight - mh - 1);
+    // The open-mouth growth must be capped by how much room is actually
+    // left below the eyes, not just a flat px/width-relative number — for
+    // large eyes (surprised/excited, whose wander can push their bottom
+    // edge close to the canvas edge already) a flat cap let the mouth grow
+    // taller than the remaining space, and clamping ITS POSITION against
+    // the canvas edge afterward (rather than clamping its GROWTH) pulled
+    // the whole mouth upward into the eyes with no gap at all — confirmed
+    // by an actual screenshot showing the open mouth's cavity touching the
+    // eyes directly. Shrinking the growth instead keeps the gap intact.
+    const availableBelow = this.screenHeight - Math.round(eyesBottomAvg) - mouthGap - 1;
+    const maxOpenExtra = Math.max(1, availableBelow - baseMh);
+    const openExtra = openAmt * Math.min(16, mw * 0.5, maxOpenExtra);
+    const mh = Math.max(1, Math.round(baseMh + openExtra));
+    const my = Math.round(eyesBottomAvg) + mouthGap;
 
     ctx.save();
     ctx.fillStyle = this.mainColor;
 
-    if (this.mouthOpen) {
-      const size = Math.max(mh, Math.round(mw * 0.35));
+    if (openAmt > 0.06) {
+      // Jaw dropped: upper lip line (my) stays put, the shape just grows
+      // downward. Rounded rect, not the smile/frown curve — real mouths
+      // flatten out shape-wise once actually open, the curve only reads
+      // when closed.
+      const capR = Math.min(mh / 2, mw / 2);
       ctx.beginPath();
-      ctx.roundRect(Math.round((this.screenWidth - size) / 2), my - 1, size, size, Math.floor(size / 3));
+      ctx.roundRect(mx, my, mw, mh, capR);
       ctx.fill();
+
+      // Dark interior cavity, once open enough for one to be visible —
+      // this is what sells "open mouth" instead of "taller white blob".
+      if (openAmt > 0.22) {
+        const inset = Math.max(2, Math.round(mw * 0.16));
+        const cavityW = Math.max(1, mw - inset * 2);
+        const cavityTop = my + Math.max(1, Math.round(baseMh * 0.8));
+        const cavityBottom = my + mh - Math.max(1, Math.round(baseMh * 0.5));
+        const cavityH = Math.max(0, cavityBottom - cavityTop);
+        if (cavityH > 1) {
+          ctx.fillStyle = this.bgColor;
+          ctx.beginPath();
+          ctx.roundRect(mx + inset, cavityTop, cavityW, cavityH, Math.min(cavityH / 2, cavityW / 2));
+          ctx.fill();
+        }
+      }
     } else {
-      // Same quadratic-curve technique as the happy eyelid crescent above,
-      // but filled as a bar rather than cut as a background mask: positive
-      // curve bows the whole bar into a "cup" (smile), negative into a
-      // "cap" (frown). End caps are rounded (arcTo) rather than square —
-      // a hard vertical corner next to a curved top/bottom edge read as a
-      // stray blocky notch rather than one clean shape.
+      // Closed: same quadratic-curve technique as the happy eyelid
+      // crescent above, but filled as a bar rather than cut as a
+      // background mask: positive curve bows the whole bar into a "cup"
+      // (smile), negative into a "cap" (frown). End caps are rounded
+      // (arcTo) rather than square — a hard vertical corner next to a
+      // curved top/bottom edge read as a stray blocky notch rather than
+      // one clean shape.
       const curve = this.mouthCurveCurrent;
       const capR = Math.min(mh / 2, mw / 2);
       ctx.beginPath();
