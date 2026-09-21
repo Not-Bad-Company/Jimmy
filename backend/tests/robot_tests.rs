@@ -111,12 +111,12 @@ async fn test_mock_stt_and_tts() {
     let stt = MockSTTProvider::new("base.en".to_string());
     assert!(stt.check_health().await);
     let stt_res = stt.transcribe(vec![1, 2, 3], "test.wav").await.unwrap();
-    assert_eq!(stt_res.text, "Hello Rocky.");
+    assert_eq!(stt_res.text, "Hello Jimmy.");
     assert!(stt_res.latency_ms > 0);
 
     let tts = MockTTSProvider::new("kokoro-v1.0".to_string(), "bm_george".to_string());
     assert!(tts.check_health().await);
-    let tts_res = tts.synthesize("Hello Rocky.", None, None).await.unwrap();
+    let tts_res = tts.synthesize("Hello Jimmy.", None, None).await.unwrap();
     assert!(!tts_res.audio_bytes.is_empty());
     assert_eq!(&tts_res.audio_bytes[0..4], b"RIFF");
     assert_eq!(tts_res.mime_type, "audio/wav");

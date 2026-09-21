@@ -8,7 +8,7 @@ name = "rocky_backend"
 path = "src/lib.rs"
 
 [[bin]]
-name = "rocky-backend"
+name = "jimmy-backend"
 path = "src/main.rs"
 
 [dependencies]

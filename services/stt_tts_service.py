@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Lightweight local STT (faster-whisper) and TTS (Kokoro-82M ONNX) microservice for Rocky.
+Lightweight local STT (faster-whisper) and TTS (Kokoro-82M ONNX) microservice for Jimmy.
 Listens on http://127.0.0.1:8001
 """
 
@@ -17,7 +17,7 @@ from faster_whisper import WhisperModel
 from kokoro_onnx import Kokoro
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("rocky-ai-service")
+logger = logging.getLogger("jimmy-ai-service")
 
 from contextlib import asynccontextmanager
 
@@ -60,7 +60,7 @@ async def lifespan(app: FastAPI):
         logger.error(f"Failed to load Kokoro model: {e}")
     yield
 
-app = FastAPI(title="Rocky STT/TTS Local Service", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Jimmy STT/TTS Local Service", version="1.0.0", lifespan=lifespan)
 
 @app.get("/health")
 def health():

@@ -112,7 +112,7 @@ impl STTProvider for MockSTTProvider {
     async fn transcribe(&self, _audio_bytes: Vec<u8>, _file_name: &str) -> Result<STTResponse> {
         tokio::time::sleep(std::time::Duration::from_millis(85)).await;
         Ok(STTResponse {
-            text: "Hello Rocky.".to_string(),
+            text: "Hello Jimmy.".to_string(),
             duration_s: 1.2,
             latency_ms: 85,
         })

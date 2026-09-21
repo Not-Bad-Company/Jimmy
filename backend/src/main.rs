@@ -26,7 +26,7 @@ use config::AppConfig;
 use state::AppState;
 
 const DEFAULT_PROMPT: &str = r#"
-You are Rocky, a small, highly intelligent robotic companion.
+You are Jimmy, a small, highly intelligent robotic companion.
 Speak in concise, simplified English with unusual phrasing.
 Be technically capable, direct, and pragmatic.
 Output JSON: {"response": "Spoken text.", "emotion": "happy", "intensity": 0.7, "gaze": "center"}
@@ -38,14 +38,14 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,rocky_backend=debug,tower_http=info".into()),
+                .unwrap_or_else(|_| "info,jimmy_backend=debug,tower_http=info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
     // Load configuration
     let config = AppConfig::from_env();
-    info!("Starting Rocky Backend on {}:{}", config.host, config.port);
+    info!("Starting Jimmy Backend on {}:{}", config.host, config.port);
     info!(
         "LLM Provider: {} (Model: {})",
         config.llm_provider, config.llm_model
@@ -59,28 +59,24 @@ async fn main() -> anyhow::Result<()> {
         config.tts_provider, config.tts_voice
     );
 
-    // Load personality prompt from file or fallback
-    let prompt_path = Path::new("prompts/rocky.md");
-    let system_prompt = if prompt_path.exists() {
-        match std::fs::read_to_string(prompt_path) {
-            Ok(content) => {
-                info!("Loaded personality prompt from prompts/rocky.md");
-                content
-            }
-            Err(e) => {
-                error!("Failed to read prompts/rocky.md: {}. Using default.", e);
-                DEFAULT_PROMPT.to_string()
+    // Load personality prompt from file or fallback (try jimmy.md, then rocky.md)
+    let prompt_paths = [
+        Path::new("prompts/jimmy.md"),
+        Path::new("../prompts/jimmy.md"),
+        Path::new("prompts/rocky.md"),
+        Path::new("../prompts/rocky.md"),
+    ];
+
+    let mut system_prompt = DEFAULT_PROMPT.to_string();
+    for p in &prompt_paths {
+        if p.exists() {
+            if let Ok(content) = std::fs::read_to_string(p) {
+                info!("Loaded personality prompt from {:?}", p);
+                system_prompt = content;
+                break;
             }
         }
-    } else {
-        info!("prompts/rocky.md not found, checking ../prompts/rocky.md");
-        let parent_path = Path::new("../prompts/rocky.md");
-        if parent_path.exists() {
-            std::fs::read_to_string(parent_path).unwrap_or_else(|_| DEFAULT_PROMPT.to_string())
-        } else {
-            DEFAULT_PROMPT.to_string()
-        }
-    };
+    }
 
     let app_state = AppState::new(config.clone(), system_prompt);
 
@@ -125,15 +121,40 @@ async fn main() -> anyhow::Result<()> {
     .layer(TraceLayer::new_for_http())
     .with_state(app_state);
 
-    let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
-    info!("Rocky backend listening on http://{}", addr);
+    // Bind to requested port, or find next available port gracefully if in use
+    let mut current_port = config.port;
+    let max_port = config.port + 50;
+    let listener = loop {
+        let addr: SocketAddr = format!("{}:{}", config.host, current_port).parse()?;
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => {
+                if current_port != config.port {
+                    info!(
+                        "Notice: Port {} was already in use. Automatically switched to port {}.",
+                        config.port, current_port
+                    );
+                }
+                break l;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && current_port < max_port => {
+                info!("Port {} in use, trying port {}...", current_port, current_port + 1);
+                current_port += 1;
+            }
+            Err(e) => {
+                error!("Failed to bind to {}:{}: {}", config.host, current_port, e);
+                return Err(e.into());
+            }
+        }
+    };
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let local_addr = listener.local_addr()?;
+    info!("Jimmy backend listening on http://{}", local_addr);
+
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
-    info!("Rocky backend shutdown complete.");
+    info!("Jimmy backend shutdown complete.");
     Ok(())
 }
 

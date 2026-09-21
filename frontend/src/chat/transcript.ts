@@ -101,7 +101,7 @@ export class TranscriptManager {
 
       const roleLabel = document.createElement('span');
       roleLabel.className = 'msg-role';
-      roleLabel.textContent = msg.role === 'user' ? 'YOU' : 'ROCKY';
+      roleLabel.textContent = msg.role === 'user' ? 'YOU' : 'JIMMY';
 
       const timeLabel = document.createElement('span');
       timeLabel.className = 'msg-time';
