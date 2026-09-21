@@ -9,6 +9,7 @@ import io
 import re
 import time
 import logging
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 import numpy as np
@@ -18,6 +19,7 @@ from pydantic import BaseModel
 import soundfile as sf
 from faster_whisper import WhisperModel
 from kokoro_onnx import Kokoro
+from resemblyzer import VoiceEncoder
 
 # Kokoro's sentence_pause/clause_pause parameters only take effect when its
 # internal chunker splits text across its ~510-phoneme model limit — short
@@ -45,11 +47,12 @@ WHISPER_COMPUTE_TYPE = os.getenv("STT_COMPUTE_TYPE", "int8" if WHISPER_DEVICE ==
 # Global instances
 whisper_model: Optional[WhisperModel] = None
 kokoro_model: Optional[Kokoro] = None
+speaker_encoder: Optional[VoiceEncoder] = None
 available_voices: list[str] = []
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global whisper_model, kokoro_model, available_voices
+    global whisper_model, kokoro_model, speaker_encoder, available_voices
     logger.info("Initializing Local STT & TTS Service...")
 
     # Load faster-whisper
@@ -71,6 +74,14 @@ async def lifespan(app: FastAPI):
             logger.warning(f"Kokoro model files not found at {MODELS_DIR}")
     except Exception as e:
         logger.error(f"Failed to load Kokoro model: {e}")
+
+    # Load Resemblyzer speaker encoder
+    try:
+        logger.info("Loading Resemblyzer speaker encoder...")
+        speaker_encoder = VoiceEncoder("cpu")
+        logger.info("Speaker encoder loaded successfully.")
+    except Exception as e:
+        logger.error(f"Failed to load speaker encoder: {e}")
     yield
 
 app = FastAPI(title="Jimmy STT/TTS Local Service", version="1.0.0", lifespan=lifespan)
@@ -88,6 +99,10 @@ def health():
             "loaded": kokoro_model is not None,
             "model": "kokoro-v1.0",
             "voices_count": len(available_voices),
+        },
+        "speaker_id": {
+            "loaded": speaker_encoder is not None,
+            "model": "resemblyzer",
         }
     }
 
@@ -195,6 +210,51 @@ async def transcribe(file: UploadFile = File(...)):
         }
     except Exception as e:
         logger.error(f"STT transcription error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+def _decode_audio_to_16k_mono(audio_bytes: bytes) -> np.ndarray:
+    """Decodes arbitrary-format audio bytes (webm/opus from the frontend
+    recorder, wav from test scripts, etc.) to a 16kHz mono float32
+    waveform via ffmpeg — the format Resemblyzer's pretrained encoder
+    expects. ffmpeg is already a hard runtime dependency of this service
+    (faster-whisper relies on it too for decoding non-WAV uploads), so
+    this adds no new system dependency.
+    """
+    proc = subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-i", "pipe:0",
+            "-ar", "16000", "-ac", "1", "-f", "wav", "pipe:1",
+        ],
+        input=audio_bytes,
+        capture_output=True,
+        check=True,
+    )
+    wav_buf = io.BytesIO(proc.stdout)
+    samples, _ = sf.read(wav_buf, dtype="float32")
+    return samples
+
+@app.post("/identify")
+async def identify(file: UploadFile = File(...)):
+    if not speaker_encoder:
+        raise HTTPException(status_code=503, detail="Speaker ID model is not loaded")
+
+    try:
+        audio_bytes = await file.read()
+        if not audio_bytes:
+            raise HTTPException(status_code=400, detail="Empty audio file")
+
+        wav = _decode_audio_to_16k_mono(audio_bytes)
+        embedding = speaker_encoder.embed_utterance(wav)
+        return {"fingerprint": embedding.tolist()}
+    except HTTPException:
+        raise
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.decode(errors="replace") if e.stderr else ""
+        logger.error(f"Speaker ID audio decode failed: {stderr}")
+        raise HTTPException(status_code=400, detail="Could not decode audio")
+    except Exception as e:
+        logger.error(f"Speaker identification error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

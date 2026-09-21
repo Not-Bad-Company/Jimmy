@@ -65,6 +65,29 @@ services/.venv/bin/python -c "import torch; print(torch.__version__)"
 ```
 Expected: version string ending in `+cpu` (e.g. `2.14.0+cpu`), not `+cu*`.
 
+**Known install snag (verified against a real environment):** `resemblyzer`
+pulls in `webrtcvad`, which imports `pkg_resources` at module load time.
+Newer `setuptools` (81+) dropped `pkg_resources`, so importing
+`resemblyzer` fails with `ModuleNotFoundError: No module named
+'pkg_resources'` unless `setuptools` is pinned below 81:
+```bash
+uv pip install --python services/.venv "setuptools<81"
+```
+Verify the whole import chain actually works (not just that pip resolved
+it — resemblyzer loads its bundled pretrained model here too, so this
+also confirms no network access is needed at runtime):
+```bash
+services/.venv/bin/python -c "
+from resemblyzer import VoiceEncoder
+enc = VoiceEncoder('cpu')
+print('OK')
+"
+```
+Expected: prints `Loaded the voice encoder model on cpu in ...` then `OK`
+(a `pkg_resources is deprecated` UserWarning is harmless noise, not an
+error). Measured load time in this environment: ~0.08s — comfortably fast
+enough for Pi 5, even accounting for a slower CPU.
+
 - [ ] **Step 2: Add the speaker encoder to service startup**
 
 In `services/stt_tts_service.py`, near the top with the other model globals (`whisper_model`, `kokoro_model`):
