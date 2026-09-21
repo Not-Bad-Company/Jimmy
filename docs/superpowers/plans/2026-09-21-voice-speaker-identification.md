@@ -47,7 +47,7 @@
 **Interfaces:**
 - Produces: `POST /identify` (multipart file upload, field name `file`) → `{"fingerprint": [f32; 256]}` on success, `503` if the model isn't loaded, `400` on empty/undecodable audio, `500` on other errors.
 
-- [ ] **Step 1: Install Resemblyzer with CPU-only PyTorch**
+- [x] **Step 1: Install Resemblyzer with CPU-only PyTorch**
 
 The default `resemblyzer` install pulls full CUDA PyTorch (verified: `nvidia-cusparselt-cu13`, `nvidia-nccl-cu13`, etc. — multi-GB, and irrelevant since Pi 5 has no CUDA GPU anyway). Install CPU-only PyTorch first so `resemblyzer` sees it already satisfied:
 
@@ -88,7 +88,7 @@ Expected: prints `Loaded the voice encoder model on cpu in ...` then `OK`
 error). Measured load time in this environment: ~0.08s — comfortably fast
 enough for Pi 5, even accounting for a slower CPU.
 
-- [ ] **Step 2: Add the speaker encoder to service startup**
+- [x] **Step 2: Add the speaker encoder to service startup**
 
 In `services/stt_tts_service.py`, near the top with the other model globals (`whisper_model`, `kokoro_model`):
 
@@ -114,7 +114,7 @@ In the `lifespan()` function, after the Kokoro TTS loading block, add (same try/
         logger.error(f"Failed to load speaker encoder: {e}")
 ```
 
-- [ ] **Step 3: Add the audio-decode helper and `/identify` endpoint**
+- [x] **Step 3: Add the audio-decode helper and `/identify` endpoint**
 
 Add near the top of the file, with the other imports:
 ```python
@@ -171,7 +171,7 @@ async def identify(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 ```
 
-- [ ] **Step 4: Add speaker-ID status to the `/health` endpoint**
+- [x] **Step 4: Add speaker-ID status to the `/health` endpoint**
 
 Find the existing `health()` function and add a `"speaker_id"` key to its returned dict, matching the `stt`/`tts` shape:
 
@@ -182,7 +182,7 @@ Find the existing `health()` function and add a `"speaker_id"` key to its return
         },
 ```
 
-- [ ] **Step 5: Restart the service and verify by hand**
+- [x] **Step 5: Restart the service and verify by hand**
 
 ```bash
 # Find and kill the running instance, then restart it the same way it's
@@ -194,7 +194,7 @@ curl -s http://127.0.0.1:8001/health
 ```
 Expected: JSON includes `"speaker_id": {"loaded": true, ...}`.
 
-- [ ] **Step 6: Write the manual similarity verification script**
+- [x] **Step 6: Write the manual similarity verification script**
 
 Real mic input isn't available in a dev sandbox — this script is meant to be run by hand against two short recordings of the same person and one of a different person once real hardware/mic is available. Create `tests/test_speaker_identify.py`:
 
@@ -283,7 +283,7 @@ if __name__ == "__main__":
 
 This step has no pass/fail here — it's a tool for later hardware-in-hand tuning, called out explicitly in the spec's testing section. Commit it as-is.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cd /home/daanh/Projects/code/private/jimmy
@@ -312,7 +312,7 @@ git commit -m "feat: add Resemblyzer speaker-embedding /identify endpoint"
     - `pub fn set_name(&self, speaker_id: i64, name: &str) -> anyhow::Result<()>`
     - `pub fn touch_last_seen(&self, speaker_id: i64) -> anyhow::Result<()>`
 
-- [ ] **Step 1: Add the `rusqlite` dependency**
+- [x] **Step 1: Add the `rusqlite` dependency**
 
 In `backend/Cargo.toml`, under `[dependencies]`, add:
 ```toml
@@ -320,7 +320,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 ```
 The `bundled` feature compiles SQLite from source as part of the build — no system SQLite library needed, which matters for a clean Pi build later.
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 Create `backend/src/speaker/store.rs` with just the struct skeleton and tests first:
 
@@ -437,7 +437,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Create `backend/src/speaker/mod.rs`**
+- [x] **Step 3: Create `backend/src/speaker/mod.rs`**
 
 ```rust
 pub mod client;
@@ -451,7 +451,7 @@ pub use store::{SpeakerMatch, SpeakerStore};
 
 (`client` and `name_extract` don't exist yet — Tasks 3 and 4 create them. For this task, temporarily comment out the `pub mod client;` / `pub use client::SpeakerIdClient;` lines and the `pub mod name_extract;` / `pub use name_extract::extract_name;` lines so this task compiles standalone; Task 3 and 4 will uncomment them.)
 
-- [ ] **Step 4: Add `mod speaker;` to the binary's module list**
+- [x] **Step 4: Add `mod speaker;` to the binary's module list**
 
 In `backend/src/main.rs`, find:
 ```rust
@@ -466,14 +466,14 @@ Add `mod speaker;` to that list (alphabetical order, after `mod robot;`).
 
 Check `backend/src/lib.rs` for a similar module list — if one exists, add `mod speaker;` (or `pub mod speaker;`, matching however the other modules are declared there) too.
 
-- [ ] **Step 5: Run the tests to confirm they fail to compile (todo!() panics)**
+- [x] **Step 5: Run the tests to confirm they fail to compile (todo!() panics)**
 
 ```bash
 cd backend && cargo test speaker::store
 ```
 Expected: compiles (once Step 3's temporary comment-outs are in place), tests panic with "not yet implemented" at runtime.
 
-- [ ] **Step 6: Implement `SpeakerStore`**
+- [x] **Step 6: Implement `SpeakerStore`**
 
 Replace the `todo!()` bodies in `backend/src/speaker/store.rs`:
 
@@ -588,14 +588,14 @@ impl SpeakerStore {
 }
 ```
 
-- [ ] **Step 7: Run the tests to confirm they pass**
+- [x] **Step 7: Run the tests to confirm they pass**
 
 ```bash
 cd backend && cargo test speaker::store
 ```
 Expected: all 4 tests pass.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 cd /home/daanh/Projects/code/private/jimmy
@@ -617,7 +617,7 @@ git commit -m "feat: add SQLite-backed SpeakerStore for voice speaker identifica
 
 This task has no meaningful unit test of its own (it's a thin HTTP wrapper around a live network call — the existing codebase doesn't unit-test its other HTTP client wrappers like `FasterWhisperProvider` either, for the same reason). It's exercised by Task 5's manual end-to-end verification instead.
 
-- [ ] **Step 1: Write `backend/src/speaker/client.rs`**
+- [x] **Step 1: Write `backend/src/speaker/client.rs`**
 
 ```rust
 use anyhow::Result;
@@ -676,7 +676,7 @@ impl SpeakerIdClient {
 }
 ```
 
-- [ ] **Step 2: Uncomment the `client` module in `backend/src/speaker/mod.rs`**
+- [x] **Step 2: Uncomment the `client` module in `backend/src/speaker/mod.rs`**
 
 It should now read:
 ```rust
@@ -690,14 +690,14 @@ pub use store::{SpeakerMatch, SpeakerStore};
 ```
 (the `name_extract` lines stay commented out until Task 4 — leave them as they were from Task 2 Step 3).
 
-- [ ] **Step 3: Confirm it compiles**
+- [x] **Step 3: Confirm it compiles**
 
 ```bash
 cd backend && cargo build
 ```
 Expected: builds cleanly (with the `name_extract` references still commented out).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cd /home/daanh/Projects/code/private/jimmy
@@ -716,7 +716,7 @@ git commit -m "feat: add SpeakerIdClient for the local speaker-ID HTTP endpoint"
 **Interfaces:**
 - Produces: `pub fn extract_name(utterance: &str) -> Option<String>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `backend/src/speaker/name_extract.rs`:
 
@@ -772,14 +772,14 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests to confirm they fail**
+- [x] **Step 2: Run the tests to confirm they fail**
 
 ```bash
 cd backend && cargo test speaker::name_extract
 ```
 Expected: panics with "not yet implemented".
 
-- [ ] **Step 3: Implement `extract_name`**
+- [x] **Step 3: Implement `extract_name`**
 
 ```rust
 /// Best-effort extraction of a spoken name from a reply given after Jimmy
@@ -845,14 +845,14 @@ pub fn extract_name(utterance: &str) -> Option<String> {
 }
 ```
 
-- [ ] **Step 4: Run the tests to confirm they pass**
+- [x] **Step 4: Run the tests to confirm they pass**
 
 ```bash
 cd backend && cargo test speaker::name_extract
 ```
 Expected: all 7 tests pass.
 
-- [ ] **Step 5: Uncomment the `name_extract` module in `backend/src/speaker/mod.rs`**
+- [x] **Step 5: Uncomment the `name_extract` module in `backend/src/speaker/mod.rs`**
 
 It should now read exactly as shown in Task 2 Step 3 (nothing commented out):
 ```rust
@@ -865,13 +865,13 @@ pub use name_extract::extract_name;
 pub use store::{SpeakerMatch, SpeakerStore};
 ```
 
-- [ ] **Step 6: Confirm the whole crate still builds and all speaker tests pass**
+- [x] **Step 6: Confirm the whole crate still builds and all speaker tests pass**
 
 ```bash
 cd backend && cargo build && cargo test speaker::
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cd /home/daanh/Projects/code/private/jimmy
@@ -892,7 +892,7 @@ git commit -m "feat: add name-extraction heuristic for unidentified speakers"
 - Consumes: `SpeakerStore::new`, `SpeakerIdClient::new` (Task 2, Task 3).
 - Produces: `AppConfig.speaker_db_path: String`, `AppConfig.speaker_match_threshold: f32`, `AppConfig.speaker_id_service_url: String`; `AppState.speaker_store: Arc<SpeakerStore>`, `AppState.speaker_id_client: Arc<SpeakerIdClient>`.
 
-- [ ] **Step 1: Add config fields**
+- [x] **Step 1: Add config fields**
 
 In `backend/src/config/mod.rs`, add to the `AppConfig` struct (after the `tts_*`/`audio_output_device` fields, before `// Conversation`):
 
@@ -916,7 +916,7 @@ In `AppConfig::from_env()`, add (after the `tts_*` block, before `session_idle_t
                 .unwrap_or_else(|_| "http://127.0.0.1:8001/identify".to_string()),
 ```
 
-- [ ] **Step 2: Add fields to `AppState`**
+- [x] **Step 2: Add fields to `AppState`**
 
 In `backend/src/state/mod.rs`, add the import:
 ```rust
@@ -951,7 +951,7 @@ In `AppState::new()`, before the final `Self { ... }` construction, add:
 
 Add `speaker_store` and `speaker_id_client` to the `Self { ... }` construction, alongside the other fields.
 
-- [ ] **Step 3: Document the new env vars**
+- [x] **Step 3: Document the new env vars**
 
 In `.env.example`, add (near the existing `STT_*`/`TTS_*` vars):
 ```
@@ -961,14 +961,14 @@ SPEAKER_MATCH_THRESHOLD=0.75
 SPEAKER_ID_SERVICE_URL=http://127.0.0.1:8001/identify
 ```
 
-- [ ] **Step 4: Confirm it builds**
+- [x] **Step 4: Confirm it builds**
 
 ```bash
 cd backend && cargo build
 ```
 Expected: builds cleanly. (`speaker_store`/`speaker_id_client` aren't used anywhere yet — that's fine, Task 6 wires them in; if the compiler warns about unused fields that's expected at this point and resolves once Task 6 lands.)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /home/daanh/Projects/code/private/jimmy
@@ -988,14 +988,14 @@ git commit -m "feat: wire SpeakerStore and SpeakerIdClient into AppConfig/AppSta
 
 This task has no isolated unit test — it's a sequence of calls glued into an existing handler that's already covered by the manual end-to-end verification in Step 4 below (the codebase's existing pattern: `voice_turn_handler` itself has no unit tests today either, since it's an HTTP handler wiring several I/O-bound calls together).
 
-- [ ] **Step 1: Add the import**
+- [x] **Step 1: Add the import**
 
 At the top of `backend/src/api/routes.rs`, add:
 ```rust
 use crate::speaker::extract_name;
 ```
 
-- [ ] **Step 2: Clone the audio bytes before they're consumed by STT, and run identification concurrently**
+- [x] **Step 2: Clone the audio bytes before they're consumed by STT, and run identification concurrently**
 
 Find (currently around line 390-406):
 ```rust
@@ -1090,7 +1090,7 @@ Replace with (clones `audio_bytes`/`file_name` once for the concurrent identify 
     };
 ```
 
-- [ ] **Step 3: Build the speaker-aware system prompt and extract a name if one was offered**
+- [x] **Step 3: Build the speaker-aware system prompt and extract a name if one was offered**
 
 Find (currently around lines 409-437, right after the `transcribed_text.is_empty()` check and the transcription broadcast):
 ```rust
@@ -1153,7 +1153,7 @@ Replace with:
     // 6. LLM Response
 ```
 
-- [ ] **Step 4: Use `turn_system_prompt` instead of `&state.system_prompt` for this handler's LLM call**
+- [x] **Step 4: Use `turn_system_prompt` instead of `&state.system_prompt` for this handler's LLM call**
 
 Find (currently around lines 458-466):
 ```rust
@@ -1181,18 +1181,18 @@ Replace with:
         .await
 ```
 
-- [ ] **Step 5: Renumber the remaining comments**
+- [x] **Step 5: Renumber the remaining comments**
 
 The handler's later step comments (`// 6. TTS Synthesis...`, `// 7. Record...`, `// 8. Transition to Speaking...`) are now off by one/two — update them to `// 7.`, `// 8.`, `// 9.` respectively so the numbering stays sequential (purely cosmetic, but leaving it wrong makes the handler confusing to read later).
 
-- [ ] **Step 6: Build**
+- [x] **Step 6: Build**
 
 ```bash
 cd backend && cargo build
 ```
 Expected: builds cleanly.
 
-- [ ] **Step 7: Manual end-to-end verification**
+- [x] **Step 7: Manual end-to-end verification**
 
 This is the actual test for this task — a real voice turn through the running system.
 
@@ -1212,7 +1212,7 @@ Run it a SECOND time with a clip of the SAME voice (can be the same file): the r
 
 Also verify graceful degradation: temporarily stop the Python service (`pkill -f stt_tts_service.py`) and confirm a voice-turn request still gets a normal reply (just without speaker awareness) rather than an error — this proves the "identification failure never blocks the turn" constraint actually holds. Restart the Python service afterward.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 cd /home/daanh/Projects/code/private/jimmy
