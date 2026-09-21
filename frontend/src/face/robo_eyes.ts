@@ -473,11 +473,14 @@ export class RoboEyes {
         this.mouthCurveDefault = -1;
         break;
       case 'determined':
-        // Bold and steady: centered, slightly squared-off corners.
+        // Bold and steady: centered, a bit less rounded than the default
+        // pill (was 6 — that read as a plain blocky rectangle once every
+        // other emotion moved to a soft near-pill radius; this keeps the
+        // "steadier/firmer" distinction without clashing with the style).
         this.eyeLheightDefault = Math.round(32 + intensity * 4);
         this.eyeRheightDefault = Math.round(32 + intensity * 4);
-        this.eyeLborderRadiusDefault = 6;
-        this.eyeRborderRadiusDefault = 6;
+        this.eyeLborderRadiusDefault = 12;
+        this.eyeRborderRadiusDefault = 12;
         this.browTiltLDefault = 2;
         this.browTiltRDefault = 2;
         this.mouthWidthDefault = 38;
@@ -733,7 +736,18 @@ export class RoboEyes {
 
     // Eyelid targets
     const halfHeight = this.eyeLheightCurrent / 2;
-    this.eyelidsTiredHeightNext = this.tired ? halfHeight : 0;
+    // Same fix as the happy crescent below: a droop/slant cut eating 50%
+    // of the eye's height read as a solid black bar (a hard sunglasses-like
+    // edge, not even curved like happy's) once the glow halo made the
+    // contrast much more visible than it was pre-glow. Capped smaller.
+    // Below ~20px tall, the eye is already flattened enough (sleepy/bored)
+    // that an additional droop cut has no room to look like a curved lid —
+    // it just reads as a flat black block stacked on a short white sliver.
+    // The reduced eye height alone already sells sleepy/bored; skip the cut
+    // there and reserve it for taller eyes (sad/worried) where it has room
+    // to actually look like a lid.
+    this.eyelidsTiredHeightNext =
+      this.tired && this.eyeLheightCurrent > 20 ? this.eyeLheightCurrent * 0.32 : 0;
     this.eyelidsAngryHeightNext = this.angry ? halfHeight : 0;
     // Happy's bottom cut is a filled dome (quadratic curve), not the
     // tired/angry diagonal slants above — a curved cut eating a full 50%
@@ -893,11 +907,12 @@ export class RoboEyes {
     // Tired / Sad top eyelids (slants down towards outside corners)
     if (this.eyelidsTiredHeight > 0.5) {
       const th = this.eyelidsTiredHeight;
+      const thInner = th * 0.5; // proportional slant, not a fixed px offset
       // Left eye (droops down on outside left)
       ctx.beginPath();
       ctx.moveTo(lx - 1, ly - 1);
       ctx.lineTo(lx + lw + 1, ly - 1);
-      ctx.lineTo(lx + lw + 1, ly + Math.max(0, th - 6));
+      ctx.lineTo(lx + lw + 1, ly + thInner);
       ctx.lineTo(lx - 1, ly + th);
       ctx.closePath();
       ctx.fill();
@@ -908,7 +923,7 @@ export class RoboEyes {
         ctx.moveTo(rx - 1, ry - 1);
         ctx.lineTo(rx + rw + 1, ry - 1);
         ctx.lineTo(rx + rw + 1, ry + th);
-        ctx.lineTo(rx - 1, ry + Math.max(0, th - 6));
+        ctx.lineTo(rx - 1, ry + thInner);
         ctx.closePath();
         ctx.fill();
       }

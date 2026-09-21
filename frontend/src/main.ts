@@ -384,8 +384,12 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     } else if (e.key === '0') {
       emotionCtrl.triggerBlink();
-    } else if (e.key >= '1' && e.key <= '9') {
-      const emoMap: Record<string, RobotEmotion> = {
+    } else if (e.code.startsWith('Digit') && e.code !== 'Digit0') {
+      // e.code (not e.key) so Shift+digit is detected reliably regardless
+      // of keyboard layout (Shift+1 on a US layout produces the e.key "!",
+      // not "1" — e.code stays "Digit1" either way).
+      const digit = e.code.slice(5); // "Digit3" -> "3"
+      const emoMapBase: Record<string, RobotEmotion> = {
         '1': 'neutral',
         '2': 'happy',
         '3': 'curious',
@@ -396,8 +400,22 @@ document.addEventListener('DOMContentLoaded', () => {
         '8': 'surprised',
         '9': 'sleepy',
       };
-      const emo = emoMap[e.key];
+      // Shift+1-9 reaches the emotions added later that don't fit a plain
+      // digit each — otherwise unreachable from this debug shortcut.
+      const emoMapShift: Record<string, RobotEmotion> = {
+        '1': 'amused',
+        '2': 'proud',
+        '3': 'bored',
+        '4': 'annoyed',
+        '5': 'skeptical',
+        '6': 'determined',
+        '7': 'worried',
+        '8': 'excited',
+        '9': 'listening',
+      };
+      const emo = (e.shiftKey ? emoMapShift : emoMapBase)[digit];
       if (emo) {
+        e.preventDefault();
         emotionCtrl.forceEmotion(emo, 0.8, 'center');
         transcript.addSystemLog(`Manual emotion override: ${emo.toUpperCase()}`);
       }
