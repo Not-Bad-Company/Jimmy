@@ -606,6 +606,18 @@ impl TTSProvider for MistralTTSProvider {
             anyhow::bail!("all {} TTS segments failed", segments.len());
         }
 
+        // Trailing silence pad after the LAST segment — every segment
+        // before this one gets a gap inserted after it (above), but the
+        // final segment's audio previously ended exactly at its last
+        // synthesized sample with zero buffer left. A sentence's natural
+        // trailing decay (breath, consonant release, falling pitch) needs
+        // a little room after the last sample to actually finish — cutting
+        // the buffer off right there reads as the voice getting chopped
+        // off mid-word instead of a clean, natural end of sentence.
+        let trailing_pad_s: f32 = 0.22;
+        let trailing_pad_samples = (trailing_pad_s * sample_rate as f32) as usize * channels as usize;
+        pcm_all.resize(pcm_all.len() + trailing_pad_samples * 2, 0);
+
         let audio_bytes = build_wav(sample_rate, channels, &pcm_all);
         let elapsed = start.elapsed().as_millis() as u64;
 

@@ -18,6 +18,14 @@ services/.venv/
 .env
 models/*.onnx
 models/*.bin
+
+# Speaker identification SQLite DB (runtime data, never committed)
+/data/
+/backend/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 models/*.wav
 models/*.png
 voice_samples/
