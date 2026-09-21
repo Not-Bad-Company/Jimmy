@@ -28,7 +28,7 @@ curl -L -o models/kokoro-v1.0.onnx https://github.com/thewh1teagle/kokoro-onnx/r
 curl -L -o models/voices-v1.0.bin https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
 
 # Pull local LLM (Qwen2.5-3B-Instruct)
-ollama pull qwen2.5:3b
+ollama pull qwen2.5:7b-instruct-q4_K_M
 ```
 
 ### Step 3: Build Frontend

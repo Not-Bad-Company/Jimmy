@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tracing::{error, info, warn};
 
+use crate::ai::tts::SegmentTiming;
 use crate::conversation::ChatMessage;
 use crate::robot::emotion::{GazeDirection, RobotEmotion, RobotState};
 use crate::robot::RobotEvent;
@@ -79,6 +80,10 @@ pub async fn clear_conversation_handler(State(state): State<AppState>) -> Json<s
 pub struct ChatRequest {
     pub message: String,
     pub synthesize_audio: Option<bool>,
+    /// Currently unused: per-segment synthesis picks a voice per-emotion
+    /// automatically (see `MistralTTSProvider::voice_id_for`), so there's
+    /// no single voice to override for a whole (potentially multi-emotion)
+    /// reply. Kept on the request type for API compatibility.
     pub voice: Option<String>,
 }
 
@@ -89,6 +94,11 @@ pub struct ChatResponse {
     pub intensity: f32,
     pub gaze: GazeDirection,
     pub audio_base64: Option<String>,
+    /// Per-segment emotion timing within `audio_base64`, in playback order
+    /// — lets the frontend switch the eyes' emotion in sync with which part
+    /// of the single concatenated audio file is actually playing, instead
+    /// of only ever showing one emotion for the whole reply.
+    pub segments: Vec<SegmentTiming>,
     pub latency: LatencyMetrics,
 }
 
@@ -116,14 +126,19 @@ pub async fn chat_handler(
     // 1. Transition to Thinking
     state.state_machine.set_thinking().await;
 
-    // 2. Add user message
-    state
+    // 2. Add user message. If enough idle time passed since the last
+    // message, this starts a fresh session (old history dropped) so a
+    // long-stale, unrelated conversation doesn't leak into the new one.
+    let (_, started_new_session) = state
         .conversation
         .add_message("user", &user_text, None)
         .await;
+    if started_new_session {
+        info!("Idle timeout exceeded — started a fresh conversation session");
+    }
 
     // 3. Fetch recent history
-    let history = state.conversation.get_recent_messages(10).await;
+    let history = state.conversation.get_recent_messages(6).await;
 
     // 4. Run LLM
     let token_tx = {
@@ -174,7 +189,35 @@ pub async fn chat_handler(
         .add_message("assistant", &llm_res.text, Some(llm_res.emotion))
         .await;
 
-    // 6. Transition to Speaking with emotion
+    // 6. Optional TTS synthesis. This runs BEFORE the Speaking state
+    // broadcast (below) — synthesis alone was measured at 0.6-1.5s, and
+    // broadcasting "Speaking" before the audio bytes even exist told
+    // clients' eyes to start the speaking animation a full TTS-generation
+    // window ahead of any audio actually being playable. Clients still
+    // decode the transferred audio before it's truly audible (handled
+    // client-side via the real playback-start event), but this removes the
+    // much larger synthesis-time gap.
+    let mut audio_base64 = None;
+    let mut tts_latency_ms = 0u64;
+    let mut segment_timings: Vec<SegmentTiming> = Vec::new();
+
+    if req.synthesize_audio.unwrap_or(true) && !llm_res.segments.is_empty() {
+        match state.tts.synthesize_segments(&llm_res.segments).await {
+            Ok((tts_out, timings)) => {
+                use base64::Engine;
+                tts_latency_ms = tts_out.latency_ms;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&tts_out.audio_bytes);
+                audio_base64 = Some(b64);
+                segment_timings = timings;
+            }
+            Err(e) => {
+                warn!("TTS synthesis error (will continue without audio): {}", e);
+            }
+        }
+    }
+
+    // 7. Transition to Speaking with emotion, now that audio (if any) is
+    // actually ready to send.
     state
         .state_machine
         .set_speaking(
@@ -183,28 +226,6 @@ pub async fn chat_handler(
             Some(llm_res.gaze),
         )
         .await;
-
-    // 7. Optional TTS synthesis
-    let mut audio_base64 = None;
-    let mut tts_latency_ms = 0u64;
-
-    if req.synthesize_audio.unwrap_or(true) && !llm_res.text.is_empty() {
-        match state
-            .tts
-            .synthesize(&llm_res.text, req.voice.as_deref(), None)
-            .await
-        {
-            Ok(tts_out) => {
-                use base64::Engine;
-                tts_latency_ms = tts_out.latency_ms;
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&tts_out.audio_bytes);
-                audio_base64 = Some(b64);
-            }
-            Err(e) => {
-                warn!("TTS synthesis error (will continue without audio): {}", e);
-            }
-        }
-    }
 
     let total_pipeline_ms = pipeline_start.elapsed().as_millis() as u64;
 
@@ -233,6 +254,7 @@ pub async fn chat_handler(
         intensity: llm_res.intensity,
         gaze: llm_res.gaze,
         audio_base64,
+        segments: segment_timings,
         latency,
     }))
 }
@@ -303,14 +325,17 @@ pub async fn voice_turn_handler(
         latency: None,
     });
 
-    // 3. Add user message
-    state
+    // 3. Add user message (may start a fresh session — see chat_handler)
+    let (_, started_new_session) = state
         .conversation
         .add_message("user", &transcribed_text, None)
         .await;
+    if started_new_session {
+        info!("Idle timeout exceeded — started a fresh conversation session");
+    }
 
     // 4. Fetch context
-    let history = state.conversation.get_recent_messages(10).await;
+    let history = state.conversation.get_recent_messages(6).await;
 
     // 5. LLM Response
     let token_tx = {
@@ -361,7 +386,30 @@ pub async fn voice_turn_handler(
         .add_message("assistant", &llm_res.text, Some(llm_res.emotion))
         .await;
 
-    // 7. Transition to Speaking
+    // 7. TTS Synthesis. Runs BEFORE the Speaking state broadcast below — see
+    // the matching comment in handle_chat() for why (broadcasting Speaking
+    // before audio exists made the eyes start their speaking animation a
+    // full TTS-generation window ahead of any audio being playable).
+    let mut audio_base64 = None;
+    let mut tts_latency = 0u64;
+    let mut segment_timings: Vec<SegmentTiming> = Vec::new();
+
+    if !llm_res.segments.is_empty() {
+        match state.tts.synthesize_segments(&llm_res.segments).await {
+            Ok((tts_out, timings)) => {
+                use base64::Engine;
+                tts_latency = tts_out.latency_ms;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&tts_out.audio_bytes);
+                audio_base64 = Some(b64);
+                segment_timings = timings;
+            }
+            Err(e) => {
+                warn!("TTS synthesis failed in voice turn: {}", e);
+            }
+        }
+    }
+
+    // 8. Transition to Speaking, now that audio (if any) is actually ready.
     state
         .state_machine
         .set_speaking(
@@ -370,29 +418,6 @@ pub async fn voice_turn_handler(
             Some(llm_res.gaze),
         )
         .await;
-
-    // 8. TTS Synthesis
-    let cfg = state.config.read().await.clone();
-    let mut audio_base64 = None;
-    let mut tts_latency = 0u64;
-
-    if !llm_res.text.is_empty() {
-        match state
-            .tts
-            .synthesize(&llm_res.text, Some(&cfg.tts_voice), None)
-            .await
-        {
-            Ok(tts_out) => {
-                use base64::Engine;
-                tts_latency = tts_out.latency_ms;
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&tts_out.audio_bytes);
-                audio_base64 = Some(b64);
-            }
-            Err(e) => {
-                warn!("TTS synthesis failed in voice turn: {}", e);
-            }
-        }
-    }
 
     let total_ms = pipeline_start.elapsed().as_millis() as u64;
 
@@ -420,6 +445,7 @@ pub async fn voice_turn_handler(
         intensity: llm_res.intensity,
         gaze: llm_res.gaze,
         audio_base64,
+        segments: segment_timings,
         latency,
     }))
 }

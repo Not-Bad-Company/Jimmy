@@ -2,8 +2,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::ai::{
-    FasterWhisperProvider, LLMProvider, LocalLlamaCppProvider, LocalTTSProvider, MockLLMProvider,
-    MockSTTProvider, MockTTSProvider, STTProvider, TTSProvider,
+    FasterWhisperProvider, LLMProvider, MistralSTTProvider, MistralTTSProvider,
+    OpenAICompatibleProvider, LocalTTSProvider, MockLLMProvider, MockSTTProvider, MockTTSProvider,
+    STTProvider, TTSProvider,
 };
 use crate::config::AppConfig;
 use crate::conversation::ConversationStore;
@@ -29,17 +30,37 @@ impl AppState {
         let llm: Arc<dyn LLMProvider> = if is_mock_llm {
             Arc::new(MockLLMProvider::new(config.llm_model.clone()))
         } else {
-            Arc::new(LocalLlamaCppProvider::new(
-                config.llm_base_url.clone(),
-                config.llm_model.clone(),
-                config.llm_temperature,
-                config.llm_top_p,
-                config.llm_max_tokens,
-            ))
+            // Mistral's La Plateforme API needs a Bearer token; a local
+            // endpoint (Ollama) needs none. Read MISTRAL_KEY directly
+            // rather than a generic LLM_API_KEY name since that's what's
+            // actually documented/set in .env for this provider.
+            let api_key = if config.llm_provider.eq_ignore_ascii_case("mistral") {
+                std::env::var("MISTRAL_KEY").ok()
+            } else {
+                None
+            };
+            Arc::new(
+                OpenAICompatibleProvider::with_api_key(
+                    config.llm_base_url.clone(),
+                    config.llm_model.clone(),
+                    config.llm_temperature,
+                    config.llm_top_p,
+                    config.llm_max_tokens,
+                    api_key,
+                )
+                .with_reasoning(config.llm_reasoning),
+            )
         };
 
         let stt: Arc<dyn STTProvider> = if is_mock_stt {
             Arc::new(MockSTTProvider::new(config.stt_model.clone()))
+        } else if config.stt_provider.eq_ignore_ascii_case("mistral") {
+            let api_key = std::env::var("MISTRAL_KEY").unwrap_or_default();
+            Arc::new(MistralSTTProvider::new(
+                config.stt_service_url.clone(),
+                config.stt_model.clone(),
+                api_key,
+            ))
         } else {
             Arc::new(FasterWhisperProvider::new(
                 config.stt_service_url.clone(),
@@ -52,6 +73,13 @@ impl AppState {
                 config.tts_model.clone(),
                 config.tts_voice.clone(),
             ))
+        } else if config.tts_provider.eq_ignore_ascii_case("mistral") {
+            let api_key = std::env::var("MISTRAL_KEY").unwrap_or_default();
+            Arc::new(MistralTTSProvider::new(
+                config.tts_service_url.clone(),
+                config.tts_model.clone(),
+                api_key,
+            ))
         } else {
             Arc::new(LocalTTSProvider::new(
                 config.tts_service_url.clone(),
@@ -60,10 +88,13 @@ impl AppState {
             ))
         };
 
+        let session_idle_timeout_minutes = config.session_idle_timeout_minutes;
+
         Self {
             config: Arc::new(RwLock::new(config)),
             state_machine: RobotStateMachine::new(),
-            conversation: ConversationStore::new(30),
+            conversation: ConversationStore::new(30)
+                .with_session_timeout(session_idle_timeout_minutes),
             llm,
             stt,
             tts,

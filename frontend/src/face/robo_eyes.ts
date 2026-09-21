@@ -20,8 +20,8 @@ export class RoboEyes {
 
   // Colors
   bgColor = '#000000';
-  mainColor = '#00F0FF'; // Vibrant OLED Cyan
-  glowColor = 'rgba(0, 240, 255, 0.4)';
+  mainColor = '#FFFFFF'; // Luminous solid white OLED
+  glowColor = 'rgba(255, 255, 255, 0.2)';
 
   // Mood states
   tired = false;
@@ -89,12 +89,31 @@ export class RoboEyes {
   blinkInterval = 2500;
   blinkIntervalVariation = 3000;
   nextBlinkTime = 0;
+  pendingDoubleBlink = false;
 
-  // Idle movement
+  // Idle movement (large occasional gaze shifts)
   idle = true;
   idleInterval = 2000;
   idleIntervalVariation = 3000;
   nextIdleTime = 0;
+
+  // Micro-saccades: small frequent jitter layered on top of the current
+  // gaze so the face never looks frozen, even between idle repositions.
+  microJitterX = 0;
+  microJitterY = 0;
+  nextMicroJitterTime = 0;
+  microJitterInterval = 500;
+  microJitterIntervalVariation = 700;
+
+  // Continuous subtle breathing pulse (always-on, independent of the
+  // stronger "thinking" pulse), so the eyes never look perfectly static.
+  breathingPhase = 0;
+
+  // Tracks the active emotion so update() can layer a per-emotion idle
+  // motion signature (angry tremor, sad droop-drift, happy bounce, etc.)
+  // on top of the base geometry, making emotions read even when the eyes
+  // are not actively mid-transition.
+  currentEmotion: RobotEmotion = 'neutral';
 
   // Shiver / Flicker animations
   hFlicker = false;
@@ -113,9 +132,16 @@ export class RoboEyes {
   laughTimer = 0;
   laughDuration = 600;
 
-  // Speaking mouth/pulse simulation
+  // Speaking mouth/pulse simulation. speakingAmplitude (0-1) is fed in from
+  // the audio player's live playback loudness once per frame — when
+  // present, the eye pulse tracks actual speech rhythm instead of a fixed
+  // sine wave that bounces at a constant rate regardless of what's being
+  // said. Falls back to the sine wave only if no amplitude data is
+  // available (e.g. autoplay was blocked before playback started).
   speaking = false;
   speakingPhase = 0;
+  speakingAmplitude = 0;
+  private speakingAmplitudeSmoothed = 0;
 
   // Thinking pulse
   thinking = false;
@@ -185,10 +211,12 @@ export class RoboEyes {
   }
 
   setEmotion(emotion: RobotEmotion, intensity: number = 0.6) {
+    this.currentEmotion = emotion;
     this.tired = false;
     this.angry = false;
     this.happy = false;
     this.sad = false;
+    this.curious = false;
     this.confused = false;
     this.thinking = false;
     this.speaking = false;
@@ -206,45 +234,52 @@ export class RoboEyes {
     switch (emotion) {
       case 'happy':
         this.happy = true;
-        this.eyeLheightDefault = Math.round(36 + intensity * 4);
-        this.eyeRheightDefault = Math.round(36 + intensity * 4);
+        this.eyeLheightDefault = Math.round(32 + intensity * 4);
+        this.eyeRheightDefault = Math.round(32 + intensity * 4);
         break;
       case 'angry':
         this.angry = true;
-        this.eyeLheightDefault = Math.round(30 + (1 - intensity) * 6);
-        this.eyeRheightDefault = Math.round(30 + (1 - intensity) * 6);
+        this.eyeLheightDefault = Math.round(24 + (1 - intensity) * 6);
+        this.eyeRheightDefault = Math.round(24 + (1 - intensity) * 6);
         break;
       case 'sad':
         this.sad = true;
-        this.tired = true; // slightly droopy
-        this.eyeLheightDefault = 28;
-        this.eyeRheightDefault = 28;
+        this.tired = true;
+        this.eyeLheightDefault = Math.round(24 + (1 - intensity) * 6);
+        this.eyeRheightDefault = Math.round(24 + (1 - intensity) * 6);
         break;
       case 'surprised':
-        this.eyeLheightDefault = 44;
-        this.eyeRheightDefault = 44;
+        this.eyeLheightDefault = 46;
+        this.eyeRheightDefault = 46;
         this.eyeLwidthDefault = 38;
         this.eyeRwidthDefault = 38;
-        this.eyeLborderRadiusDefault = 16;
-        this.eyeRborderRadiusDefault = 16;
+        this.eyeLborderRadiusDefault = 18;
+        this.eyeRborderRadiusDefault = 18;
         break;
       case 'curious':
         this.curious = true;
         this.eyeLheightDefault = 38;
-        this.eyeRheightDefault = 38;
+        this.eyeRheightDefault = 30;
+        this.eyeLborderRadiusDefault = 10;
+        this.eyeRborderRadiusDefault = 8;
         break;
       case 'confused':
         this.confused = true;
+        this.eyeLheightDefault = 36;
+        this.eyeRheightDefault = 24;
         this.animConfused();
         break;
       case 'sleepy':
         this.tired = true;
-        this.eyeLheightDefault = 16;
-        this.eyeRheightDefault = 16;
+        this.eyeLheightDefault = 10;
+        this.eyeRheightDefault = 10;
+        this.eyeLborderRadiusDefault = 5;
+        this.eyeRborderRadiusDefault = 5;
         break;
       case 'thinking':
         this.thinking = true;
-        this.setPosition('up');
+        this.eyeLheightDefault = 30;
+        this.eyeRheightDefault = 30;
         break;
       case 'listening':
         this.eyeLheightDefault = 38;
@@ -254,11 +289,77 @@ export class RoboEyes {
         break;
       case 'speaking':
         this.speaking = true;
+        this.eyeLheightDefault = 36;
+        this.eyeRheightDefault = 36;
         break;
       case 'error':
         this.angry = true;
         this.hFlicker = true;
         this.hFlickerAmplitude = 3;
+        this.eyeLheightDefault = 24;
+        this.eyeRheightDefault = 24;
+        break;
+      // Newer emotions reuse the same eyelid/shape mechanics as their
+      // nearest existing neighbor, at different magnitudes — this keeps
+      // them visually coherent with the rest of the face rather than each
+      // needing wholly new geometry.
+      case 'amused':
+        // A smaller, asymmetric "smirk" version of happy.
+        this.happy = true;
+        this.eyeLheightDefault = Math.round(30 + intensity * 3);
+        this.eyeRheightDefault = Math.round(26 + intensity * 2);
+        break;
+      case 'proud':
+        // Bigger, steadier happy — no curious/sideways drift.
+        this.happy = true;
+        this.eyeLheightDefault = Math.round(34 + intensity * 5);
+        this.eyeRheightDefault = Math.round(34 + intensity * 5);
+        this.eyeLborderRadiusDefault = 10;
+        this.eyeRborderRadiusDefault = 10;
+        break;
+      case 'bored':
+        // Droopy like sleepy, but not fully closed.
+        this.tired = true;
+        this.eyeLheightDefault = Math.round(18 - intensity * 4);
+        this.eyeRheightDefault = Math.round(18 - intensity * 4);
+        break;
+      case 'annoyed':
+        // Milder angry — same mechanic, smaller size reduction.
+        this.angry = true;
+        this.eyeLheightDefault = Math.round(28 + (1 - intensity) * 4);
+        this.eyeRheightDefault = Math.round(28 + (1 - intensity) * 4);
+        break;
+      case 'skeptical':
+        // Sharper asymmetric version of curious — one eye narrows more.
+        this.curious = true;
+        this.eyeLheightDefault = 34;
+        this.eyeRheightDefault = 22;
+        this.eyeLborderRadiusDefault = 8;
+        this.eyeRborderRadiusDefault = 6;
+        break;
+      case 'determined':
+        // Bold and steady: centered, slightly squared-off corners.
+        this.eyeLheightDefault = Math.round(32 + intensity * 4);
+        this.eyeRheightDefault = Math.round(32 + intensity * 4);
+        this.eyeLborderRadiusDefault = 6;
+        this.eyeRborderRadiusDefault = 6;
+        break;
+      case 'worried':
+        // Between confused and sad — mild droop, gaze up (scanning for
+        // the problem) rather than down (sad's resignation).
+        this.tired = true;
+        this.eyeLheightDefault = Math.round(28 + (1 - intensity) * 4);
+        this.eyeRheightDefault = Math.round(30 + (1 - intensity) * 4);
+        break;
+      case 'excited':
+        // Bigger and rounder than surprised, with happy's smile curve.
+        this.happy = true;
+        this.eyeLheightDefault = Math.round(40 + intensity * 6);
+        this.eyeRheightDefault = Math.round(40 + intensity * 6);
+        this.eyeLwidthDefault = 38;
+        this.eyeRwidthDefault = 38;
+        this.eyeLborderRadiusDefault = 16;
+        this.eyeRborderRadiusDefault = 16;
         break;
       case 'neutral':
       default:
@@ -305,11 +406,36 @@ export class RoboEyes {
   }
 
   update(now: number) {
-    // 1. Auto-blinker timing
+    // 1. Auto-blinker timing. Occasionally chain a quick second blink
+    // (real eyes rarely blink in perfectly isolated, evenly-spaced beats).
     if (this.autoblinker && now >= this.nextBlinkTime) {
       this.blink();
-      this.nextBlinkTime = now + this.blinkInterval + Math.random() * this.blinkIntervalVariation;
+      if (this.pendingDoubleBlink) {
+        this.pendingDoubleBlink = false;
+        this.nextBlinkTime = now + 180;
+      } else {
+        this.pendingDoubleBlink = Math.random() < 0.18;
+        this.nextBlinkTime = now + this.blinkInterval + Math.random() * this.blinkIntervalVariation;
+      }
     }
+
+    // 1b. Micro-saccades: small frequent jitter so the eyes never look
+    // perfectly frozen between the larger idle repositions.
+    if (now >= this.nextMicroJitterTime) {
+      if (!this.speaking && !this.thinking) {
+        this.microJitterX = (Math.random() - 0.5) * 3;
+        this.microJitterY = (Math.random() - 0.5) * 2;
+      } else {
+        this.microJitterX = 0;
+        this.microJitterY = 0;
+      }
+      this.nextMicroJitterTime =
+        now + this.microJitterInterval + Math.random() * this.microJitterIntervalVariation;
+    }
+
+    // 1c. Continuous breathing pulse, always on, independent of emotion.
+    this.breathingPhase += 0.02;
+    const breathing = Math.sin(this.breathingPhase) * 1.2;
 
     // 2. Idle eye movement timing
     if (this.idle && !this.speaking && !this.thinking && now >= this.nextIdleTime) {
@@ -331,30 +457,81 @@ export class RoboEyes {
       this.vFlicker = false;
     }
 
-    // 4. Speaking bounce / speech rhythm
+    // 4. Speaking bounce / speech rhythm. Smooth the raw amplitude signal
+    // (it's noisy per-frame) with a fast attack / slower release so the
+    // pulse still feels tightly coupled to the voice without visibly
+    // jittering every frame.
     if (this.speaking) {
-      this.speakingPhase += 0.25;
-      const pulse = Math.sin(this.speakingPhase) * 4;
-      this.eyeLheightNext = Math.max(12, this.eyeLheightDefault + pulse);
-      this.eyeRheightNext = Math.max(12, this.eyeRheightDefault + pulse);
+      const target = this.speakingAmplitude;
+      const rate = target > this.speakingAmplitudeSmoothed ? 0.6 : 0.25;
+      this.speakingAmplitudeSmoothed += (target - this.speakingAmplitudeSmoothed) * rate;
+
+      if (this.speakingAmplitudeSmoothed > 0.02) {
+        // Real audio amplitude is driving the pulse: eyes widen with
+        // loudness, matching actual speech rhythm.
+        const pulse = this.speakingAmplitudeSmoothed * 10;
+        this.eyeLheightNext = Math.max(12, this.eyeLheightDefault + pulse);
+        this.eyeRheightNext = Math.max(12, this.eyeRheightDefault + pulse);
+      } else {
+        // No amplitude data yet (or a silent gap in speech) — fall back to
+        // a gentle sine idle so the eyes don't go dead-still mid-utterance.
+        this.speakingPhase += 0.15;
+        const pulse = Math.sin(this.speakingPhase) * 2;
+        this.eyeLheightNext = Math.max(12, this.eyeLheightDefault + pulse);
+        this.eyeRheightNext = Math.max(12, this.eyeRheightDefault + pulse);
+      }
+    } else {
+      this.speakingAmplitudeSmoothed = 0;
     }
 
-    // 5. Thinking subtle pulse
+    // 5. Thinking subtle pulse (overrides the idle breathing baseline while active)
     if (this.thinking) {
       this.thinkingPhase += 0.08;
       this.eyeLheightOffset = Math.sin(this.thinkingPhase) * 2;
       this.eyeRheightOffset = Math.sin(this.thinkingPhase) * 2;
     } else {
-      this.eyeLheightOffset = 0;
-      this.eyeRheightOffset = 0;
+      // Idle baseline: continuous breathing, plus a per-emotion motion
+      // signature so emotions read even when not mid-transition.
+      //
+      // NOTE: 'angry' previously had a continuous horizontal tremor here.
+      // Removed — Jimmy can sit idle-but-angry for a while after a reply
+      // (emotion persists through idle; nothing resets it), and a never-
+      // ending shake over that whole stretch read as broken/nervous rather
+      // than expressive. The angry eyelid shape alone already reads clearly
+      // as angry; it doesn't need a constant motion on top to sell it.
+      this.eyeLheightOffset = breathing;
+      this.eyeRheightOffset = breathing;
+
+      switch (this.currentEmotion) {
+        case 'happy':
+          // Gentle upward bounce
+          this.eyeLheightOffset += Math.abs(Math.sin(this.breathingPhase * 1.5)) * 2;
+          this.eyeRheightOffset += Math.abs(Math.sin(this.breathingPhase * 1.5)) * 2;
+          break;
+        case 'sad':
+          // Slow downward droop-drift, settling lower over time then resetting
+          this.eyeLheightOffset -= (Math.sin(this.breathingPhase * 0.5) + 1) * 1.5;
+          this.eyeRheightOffset -= (Math.sin(this.breathingPhase * 0.5) + 1) * 1.5;
+          break;
+        case 'curious':
+          // Asymmetric tilt: one eye drifts slightly larger than the other, alternating
+          this.eyeLheightOffset += Math.sin(this.breathingPhase * 0.7) * 2.5;
+          this.eyeRheightOffset -= Math.sin(this.breathingPhase * 0.7) * 2.5;
+          break;
+      }
     }
 
-    // 6. Curious gaze expansion when looking sideways
+    // 6. Curious gaze expansion when looking sideways. Additive, not an
+    // overwrite — overwriting eyeLheightOffset/eyeRheightOffset here
+    // discarded whatever smooth per-frame signature step 5 had just
+    // computed (breathing, the curious tilt oscillation, etc.) and
+    // replaced it with a flat value, producing a visible pop/jump every
+    // time idle wandering happened to reach a screen edge while curious.
     if (this.curious) {
       if (this.eyeLxNext <= 6) {
-        this.eyeLheightOffset = 6;
+        this.eyeLheightOffset += 6;
       } else if (this.eyeRxNext >= this.screenWidth - this.eyeRwidthCurrent - 6) {
-        this.eyeRheightOffset = 6;
+        this.eyeRheightOffset += 6;
       }
     }
 
@@ -418,6 +595,12 @@ export class RoboEyes {
       this.vFlickerAlternate = !this.vFlickerAlternate;
     }
 
+    // Apply micro-saccade jitter (both eyes move together, like a real gaze shift)
+    lx += this.microJitterX;
+    rx += this.microJitterX;
+    ly += this.microJitterY;
+    ry += this.microJitterY;
+
     // Eye dimensions
     const lw = Math.max(1, Math.round(this.eyeLwidthCurrent));
     const lh = Math.max(1, Math.round(this.eyeLheightCurrent));
@@ -453,76 +636,74 @@ export class RoboEyes {
     // 3. Eyelids clipping using background color
     ctx.fillStyle = this.bgColor;
 
-    // Tired top eyelids (diagonal triangles slanting down towards outside)
+    // Tired / Sad top eyelids (slants down towards outside corners)
     if (this.eyelidsTiredHeight > 0.5) {
       const th = this.eyelidsTiredHeight;
-      // Left eye
+      // Left eye (droops down on outside left)
       ctx.beginPath();
-      ctx.moveTo(lx, ly - 1);
-      ctx.lineTo(lx + lw, ly - 1);
-      ctx.lineTo(lx, ly + th);
+      ctx.moveTo(lx - 1, ly - 1);
+      ctx.lineTo(lx + lw + 1, ly - 1);
+      ctx.lineTo(lx + lw + 1, ly + Math.max(0, th - 6));
+      ctx.lineTo(lx - 1, ly + th);
       ctx.closePath();
       ctx.fill();
 
-      // Right eye
+      // Right eye (droops down on outside right)
       if (!this.cyclops) {
         ctx.beginPath();
-        ctx.moveTo(rx, ry - 1);
-        ctx.lineTo(rx + rw, ry - 1);
-        ctx.lineTo(rx + rw, ry + th);
+        ctx.moveTo(rx - 1, ry - 1);
+        ctx.lineTo(rx + rw + 1, ry - 1);
+        ctx.lineTo(rx + rw + 1, ry + th);
+        ctx.lineTo(rx - 1, ry + Math.max(0, th - 6));
         ctx.closePath();
         ctx.fill();
       }
     }
 
-    // Angry top eyelids (diagonal triangles slanting down towards inside)
+    // Angry top eyelids (slants down towards center/bridge)
     if (this.eyelidsAngryHeight > 0.5) {
       const ah = this.eyelidsAngryHeight;
-      // Left eye (slants down towards center/right)
+      // Left eye (slants down towards center right)
       ctx.beginPath();
-      ctx.moveTo(lx, ly - 1);
-      ctx.lineTo(lx + lw, ly - 1);
-      ctx.lineTo(lx + lw, ly + ah);
+      ctx.moveTo(lx - 1, ly - 1);
+      ctx.lineTo(lx + lw + 1, ly - 1);
+      ctx.lineTo(lx + lw + 1, ly + ah);
+      ctx.lineTo(lx - 1, ly + Math.max(0, ah - 10));
       ctx.closePath();
       ctx.fill();
 
-      // Right eye (slants down towards center/left)
+      // Right eye (slants down towards center left)
       if (!this.cyclops) {
         ctx.beginPath();
-        ctx.moveTo(rx, ry - 1);
-        ctx.lineTo(rx + rw, ry - 1);
-        ctx.lineTo(rx, ry + ah);
+        ctx.moveTo(rx - 1, ry - 1);
+        ctx.lineTo(rx + rw + 1, ry - 1);
+        ctx.lineTo(rx + rw + 1, ry + Math.max(0, ah - 10));
+        ctx.lineTo(rx - 1, ry + ah);
         ctx.closePath();
         ctx.fill();
       }
     }
 
-    // Happy bottom eyelids (curved mask at bottom of eyes)
+    // Happy bottom eyelids (smooth smiling crescent curve)
     if (this.eyelidsHappyBottomOffset > 0.5) {
       const ho = this.eyelidsHappyBottomOffset;
-      // Left eye bottom cut
+      // Left eye curved bottom cut
       ctx.beginPath();
-      ctx.roundRect(
-        lx - 1,
-        ly + lh - ho + 1,
-        lw + 2,
-        this.eyeLheightDefault,
-        lr,
-      );
+      ctx.moveTo(lx - 2, ly + lh + 2);
+      ctx.lineTo(lx - 2, ly + lh - 1);
+      ctx.quadraticCurveTo(lx + lw / 2, ly + lh - ho - 6, lx + lw + 2, ly + lh - 1);
+      ctx.lineTo(lx + lw + 2, ly + lh + 2);
+      ctx.closePath();
       ctx.fill();
 
-      // Right eye bottom cut
+      // Right eye curved bottom cut
       if (!this.cyclops) {
-        const rw = Math.max(1, Math.round(this.eyeRwidthCurrent));
-        const rr = Math.min(Math.round(this.eyeRborderRadiusCurrent), Math.floor(this.eyeRheightCurrent / 2));
         ctx.beginPath();
-        ctx.roundRect(
-          rx - 1,
-          ry + this.eyeRheightCurrent - ho + 1,
-          rw + 2,
-          this.eyeRheightDefault,
-          rr,
-        );
+        ctx.moveTo(rx - 2, ry + rh + 2);
+        ctx.lineTo(rx - 2, ry + rh - 1);
+        ctx.quadraticCurveTo(rx + rw / 2, ry + rh - ho - 6, rx + rw + 2, ry + rh - 1);
+        ctx.lineTo(rx + rw + 2, ry + rh + 2);
+        ctx.closePath();
         ctx.fill();
       }
     }

@@ -39,6 +39,17 @@ pub enum RobotEmotion {
     Listening,
     Speaking,
     Error,
+    // Added for wider expressive range within a single reply (a human
+    // conversationally shifts emotion several times in one sentence; Jimmy
+    // was previously locked to exactly one emotion for an entire reply).
+    Amused,
+    Proud,
+    Bored,
+    Annoyed,
+    Skeptical,
+    Determined,
+    Worried,
+    Excited,
 }
 
 impl std::fmt::Display for RobotEmotion {
@@ -56,6 +67,14 @@ impl std::fmt::Display for RobotEmotion {
             RobotEmotion::Listening => write!(f, "listening"),
             RobotEmotion::Speaking => write!(f, "speaking"),
             RobotEmotion::Error => write!(f, "error"),
+            RobotEmotion::Amused => write!(f, "amused"),
+            RobotEmotion::Proud => write!(f, "proud"),
+            RobotEmotion::Bored => write!(f, "bored"),
+            RobotEmotion::Annoyed => write!(f, "annoyed"),
+            RobotEmotion::Skeptical => write!(f, "skeptical"),
+            RobotEmotion::Determined => write!(f, "determined"),
+            RobotEmotion::Worried => write!(f, "worried"),
+            RobotEmotion::Excited => write!(f, "excited"),
         }
     }
 }

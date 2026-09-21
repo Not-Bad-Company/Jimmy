@@ -27,6 +27,12 @@ pub struct AppConfig {
     pub tts_model: String,
     pub tts_voice: String,
     pub audio_output_device: String,
+
+    // Conversation
+    /// If more than this many minutes pass with no new message, the next
+    /// message starts a fresh conversation (old history is dropped) instead
+    /// of being appended to a stale, possibly unrelated context.
+    pub session_idle_timeout_minutes: i64,
 }
 
 impl AppConfig {
@@ -42,7 +48,7 @@ impl AppConfig {
 
             llm_provider: env::var("LLM_PROVIDER").unwrap_or_else(|_| "local".to_string()),
             llm_base_url: env::var("LLM_BASE_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:11434/v1".to_string()),
+                .unwrap_or_else(|_| "http://127.0.0.1:11435/v1".to_string()),
             llm_model: env::var("LLM_MODEL").unwrap_or_else(|_| "qwen2.5:3b".to_string()),
             llm_temperature: env::var("LLM_TEMPERATURE")
                 .ok()
@@ -74,6 +80,11 @@ impl AppConfig {
             tts_voice: env::var("TTS_VOICE").unwrap_or_else(|_| "bm_george".to_string()),
             audio_output_device: env::var("AUDIO_OUTPUT_DEVICE")
                 .unwrap_or_else(|_| "default".to_string()),
+
+            session_idle_timeout_minutes: env::var("SESSION_IDLE_TIMEOUT_MINUTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20),
         }
     }
 }

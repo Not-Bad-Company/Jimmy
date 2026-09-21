@@ -35,7 +35,7 @@ def test_http_post_json(path, data):
     url = f"{BASE_URL}{path}"
     payload = json.dumps(data).encode("utf-8")
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=30) as response:
+    with urllib.request.urlopen(req, timeout=90) as response:
         assert response.status == 200, f"Expected 200, got {response.status}"
         return json.loads(response.read().decode("utf-8"))
 
@@ -90,7 +90,7 @@ async def main():
     print("\n2. Testing frontend static serving...")
     index_html = test_http_get("/").decode("utf-8")
     assert "<canvas id=\"faceCanvas\"" in index_html
-    assert "JIMMY" in index_html
+    assert "jimmy" in index_html.lower()
     print("✓ Frontend HTML serving PASSED")
 
     # 3. Status

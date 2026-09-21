@@ -1,6 +1,14 @@
 /**
  * FaceRenderer: Manages the HTML5 Canvas display and renders RoboEyes
- * at the canonical 128x64 resolution, scaled cleanly to the screen.
+ * at the canonical 128x64 logical resolution, scaled cleanly to the screen.
+ *
+ * RoboEyes.draw() always works in 128x64 logical units (so the same eye
+ * code can later target a real OLED framebuffer 1:1). For the browser we
+ * do NOT rasterize at 128x64 and then bitmap-stretch it up — that produces
+ * visibly blurry/pixelated edges once stretched 10-15x on a real monitor.
+ * Instead we apply a canvas transform (translate + scale) so every shape
+ * RoboEyes draws is rasterized directly at full output resolution: crisp
+ * vector edges at any screen size.
  */
 
 import { RoboEyes } from './robo_eyes';
@@ -8,8 +16,6 @@ import { RoboEyes } from './robo_eyes';
 export class FaceRenderer {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
-  private offscreenCanvas: HTMLCanvasElement;
-  private offscreenCtx: CanvasRenderingContext2D;
   private eyes: RoboEyes;
 
   readonly canonicalWidth = 128;
@@ -20,14 +26,6 @@ export class FaceRenderer {
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('Could not get 2D context');
     this.ctx = ctx;
-
-    // Canonical 128x64 offscreen buffer
-    this.offscreenCanvas = document.createElement('canvas');
-    this.offscreenCanvas.width = this.canonicalWidth;
-    this.offscreenCanvas.height = this.canonicalHeight;
-    const offCtx = this.offscreenCanvas.getContext('2d', { alpha: false });
-    if (!offCtx) throw new Error('Could not get offscreen context');
-    this.offscreenCtx = offCtx;
 
     this.eyes = eyes;
     this.handleResize();
@@ -45,56 +43,35 @@ export class FaceRenderer {
     // 1. Update eye geometry and animations
     this.eyes.update(now);
 
-    // 2. Draw on canonical 128x64 buffer
-    this.eyes.draw(this.offscreenCtx);
-
-    // 3. Scale canonical 128x64 buffer to main canvas with OLED bezel styling
     const w = this.canvas.width;
     const h = this.canvas.height;
 
-    this.ctx.fillStyle = '#05070a';
+    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+    this.ctx.fillStyle = '#000000';
     this.ctx.fillRect(0, 0, w, h);
 
-    // Maintain 2:1 aspect ratio inside canvas
-    const targetAspect = 128 / 64;
+    // Maintain 2:1 aspect ratio inside canvas, prominent center scale (occupies up to ~80% of view)
+    const targetAspect = this.canonicalWidth / this.canonicalHeight;
     const currentAspect = w / h;
 
-    let drawW: number, drawH: number, drawX: number, drawY: number;
-
+    let drawW: number, drawH: number;
     if (currentAspect > targetAspect) {
-      drawH = h * 0.9;
+      drawH = h * 0.75;
       drawW = drawH * targetAspect;
-      drawX = (w - drawW) / 2;
-      drawY = (h - drawH) / 2;
     } else {
-      drawW = w * 0.9;
+      drawW = w * 0.85;
       drawH = drawW / targetAspect;
-      drawX = (w - drawW) / 2;
-      drawY = (h - drawH) / 2;
     }
+    const drawX = (w - drawW) / 2;
+    const drawY = (h - drawH) / 2;
+    const scale = drawW / this.canonicalWidth;
 
+    // 2. Draw the eyes with a real transform, not a bitmap stretch, so
+    // edges stay crisp at any zoom level instead of blurring.
     this.ctx.save();
-    // High quality scaling with slight scanline / OLED pixel softness
-    this.ctx.imageSmoothingEnabled = true;
-    this.ctx.imageSmoothingQuality = 'high';
-
-    // Outer screen bezel with soft border
-    this.ctx.strokeStyle = '#1a2230';
-    this.ctx.lineWidth = 4;
-    this.ctx.strokeRect(drawX - 2, drawY - 2, drawW + 4, drawH + 4);
-
-    this.ctx.drawImage(
-      this.offscreenCanvas,
-      0,
-      0,
-      this.canonicalWidth,
-      this.canonicalHeight,
-      Math.round(drawX),
-      Math.round(drawY),
-      Math.round(drawW),
-      Math.round(drawH),
-    );
-
+    this.ctx.translate(drawX, drawY);
+    this.ctx.scale(scale, scale);
+    this.eyes.draw(this.ctx);
     this.ctx.restore();
   }
 }

@@ -12,7 +12,26 @@ export type RobotEmotion =
   | 'thinking'
   | 'listening'
   | 'speaking'
-  | 'error';
+  | 'error'
+  | 'amused'
+  | 'proud'
+  | 'bored'
+  | 'annoyed'
+  | 'skeptical'
+  | 'determined'
+  | 'worried'
+  | 'excited';
+
+/** One emotionally-tagged chunk of a reply, with its timing offset into the
+ * single concatenated audio file, so the eyes can switch emotion in sync
+ * with which part of the reply is actually playing — not just once at the
+ * start of the whole reply. */
+export interface SegmentTiming {
+  start_ms: number;
+  duration_ms: number;
+  emotion: RobotEmotion;
+  intensity: number;
+}
 
 export type GazeDirection =
   | 'center'

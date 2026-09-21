@@ -9,7 +9,7 @@ Local Speech-to-Text (faster-whisper)
        ↓
 Rocky Receives Text
        ↓
-Local LLM (Qwen2.5-3B-Instruct) + Personality Prompt
+LLM (local Ollama or Mistral API — see docs/local-ai.md) + Personality Prompt
        ↓
 Emotional State & Gaze Determined ({ emotion, intensity, gaze })
        ↓
@@ -35,11 +35,13 @@ Return to Idle Automatically
   - Watchdog timer: Automatically rescues from stuck states (30s timeout on listening, 60s timeout on thinking/speaking).
   - Broadcasts events to all active WebSocket clients via `tokio::sync::broadcast`.
 - **AI Abstractions** (`backend/src/ai/`):
-  - `LLMProvider`: `LocalLlamaCppProvider` (connects to local OpenAI-compatible endpoint) and `MockLLMProvider`.
+  - `LLMProvider`: `OpenAICompatibleProvider` and `MockLLMProvider`. `OpenAICompatibleProvider` talks to any OpenAI-compatible chat-completions endpoint — used for both local Ollama (no auth) and Mistral's API (Bearer token via `MISTRAL_KEY`), selected by `LLM_PROVIDER` in `.env`. See `docs/local-ai.md` for why/when each is used.
   - `STTProvider`: `FasterWhisperProvider` (HTTP client to local STT service) and `MockSTTProvider`.
   - `TTSProvider`: `LocalTTSProvider` (HTTP client to local Kokoro service) and `MockTTSProvider`.
 - **Conversation Store** (`backend/src/conversation/`):
-  - In-memory conversation history with automatic pruning to conserve model context and keep inference fast.
+  - In-memory conversation history with automatic pruning (last 30 messages kept; last 10 sent to the LLM per turn) to conserve model context and keep inference fast.
+  - **Session boundaries**: if `SESSION_IDLE_TIMEOUT_MINUTES` (default 20) passes with no new message, the next message clears prior history and starts a fresh conversation, rather than feeding a stale/unrelated conversation into a new one. This is orthogonal to which LLM provider is active — it's not something the Mistral migration "fixes" on its own, it's a backend feature.
+  - **Within-session topic bleed**: observed directly in testing — a self-contained new message ("That is a terrible idea") got answered as if continuing an old, unrelated topic (quantum computing) still sitting in the last-N-messages window, even though the session hadn't timed out. Two mitigations, both in place: the window sent to the LLM was reduced from 10 to 6 messages (`get_recent_messages(6)` in `routes.rs`), and `prompts/jimmy.md` now has an explicit "Handling Conversation History" section instructing the model to weight the latest message as primary and not drag in old unrelated topics just because they're present in context. This reduces the problem; it doesn't structurally eliminate it — a smarter approach (e.g. detecting topic shifts and trimming irrelevant turns, or summarizing old context instead of keeping raw turns) would be the next step if it keeps happening.
 
 ### 1.2 Local STT & TTS Service (`services/stt_tts_service.py`)
 - Python FastAPI micro-daemon on `http://127.0.0.1:8001`.

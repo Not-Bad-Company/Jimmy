@@ -6,15 +6,28 @@ Listens on http://127.0.0.1:8001
 
 import os
 import io
+import re
 import time
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
+import numpy as np
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel
 import soundfile as sf
 from faster_whisper import WhisperModel
 from kokoro_onnx import Kokoro
+
+# Kokoro's sentence_pause/clause_pause parameters only take effect when its
+# internal chunker splits text across its ~510-phoneme model limit — short
+# text (like Jimmy's replies, which are always short by design) never hits
+# that limit, so those parameters silently do nothing and Kokoro's own
+# built-in pause-on-period is all you get, which is barely perceptible
+# ("immediately continues" after a period). Splitting on sentence boundaries
+# ourselves and inserting real, controllable silence between each
+# synthesized sentence is the only way to actually get that pause.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("jimmy-ai-service")
@@ -86,6 +99,12 @@ class SynthesizeRequest(BaseModel):
     text: str
     voice: Optional[str] = "bm_george"
     speed: Optional[float] = 1.0
+    # Kokoro has no direct "emotion" control, but pause timing between
+    # sentences/clauses meaningfully changes how expressive the delivery
+    # sounds (clipped and urgent vs. slow and deliberate). The backend
+    # derives these from Jimmy's selected emotion + intensity.
+    sentence_pause: Optional[float] = 0.25
+    clause_pause: Optional[float] = 0.1
 
 @app.post("/synthesize")
 def synthesize(req: SynthesizeRequest):
@@ -99,8 +118,38 @@ def synthesize(req: SynthesizeRequest):
     start_time = time.perf_counter()
     try:
         voice = req.voice or "bm_george"
-        samples, sample_rate = kokoro_model.create(clean_text, voice=voice, speed=req.speed or 1.0)
-        
+        speed = req.speed or 1.0
+        sentence_pause = req.sentence_pause if req.sentence_pause is not None else 0.25
+
+        sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(clean_text) if s.strip()]
+        if len(sentences) <= 1:
+            samples, sample_rate = kokoro_model.create(clean_text, voice=voice, speed=speed)
+        else:
+            # Synthesizing each sentence is a separate ONNX inference call;
+            # run them concurrently (onnxruntime releases the GIL during
+            # the actual compute) instead of sequentially, so N sentences
+            # cost roughly one inference's wall-clock time instead of N —
+            # a sequential version of this was measured taking 7+ seconds
+            # for an 8-sentence reply.
+            results = [None] * len(sentences)
+            sample_rate = 24000
+
+            def _synth(i: int, sentence: str):
+                part_samples, sr = kokoro_model.create(sentence, voice=voice, speed=speed)
+                results[i] = (part_samples, sr)
+
+            with ThreadPoolExecutor(max_workers=min(8, len(sentences))) as pool:
+                list(pool.map(lambda args: _synth(*args), enumerate(sentences)))
+
+            chunks = []
+            for i, (part_samples, sr) in enumerate(results):
+                sample_rate = sr
+                chunks.append(part_samples)
+                if i < len(sentences) - 1 and sentence_pause > 0:
+                    silence = np.zeros(int(sentence_pause * sr), dtype=part_samples.dtype)
+                    chunks.append(silence)
+            samples = np.concatenate(chunks)
+
         # Encode to WAV buffer
         buf = io.BytesIO()
         sf.write(buf, samples, sample_rate, format="WAV", subtype="PCM_16")

@@ -6,66 +6,115 @@ import { RobotConnection } from './state/connection';
 import { TranscriptManager } from './chat/transcript';
 import { AudioRecorder } from './audio/recorder';
 import { AudioPlayer } from './audio/player';
-import { EmotionState, GazeDirection, RobotEmotion } from './face/types';
+import { EmotionState, RobotEmotion, SegmentTiming } from './face/types';
 
 document.addEventListener('DOMContentLoaded', () => {
   // 1. Initialize Face Engine
   const canvas = document.getElementById('faceCanvas') as HTMLCanvasElement;
+  const faceStage = document.getElementById('faceStage') as HTMLElement;
   const eyes = new RoboEyes();
   const renderer = new FaceRenderer(canvas, eyes);
   const emotionCtrl = new EmotionController(eyes);
-  const animCtrl = new AnimationController(renderer);
-  animCtrl.start();
+  const animCtrl = new AnimationController(renderer, eyes);
 
-  // 2. Initialize Subsystems
+  // 2. Initialize Audio & Subsystems
   const connection = new RobotConnection();
-  const transcriptEl = document.getElementById('transcriptScroll') as HTMLElement;
-  const transcript = new TranscriptManager(transcriptEl);
+  const rawLogEl = document.getElementById('rawLog') as HTMLElement;
+  const transcript = new TranscriptManager(rawLogEl);
+  transcript.clear(); // renders the initial "no activity yet" empty state
   const recorder = new AudioRecorder();
   const player = new AudioPlayer();
 
+  // Drive the speaking eye pulse from real playback loudness instead of a
+  // fixed sine wave (see face/animation.ts + audio/player.ts for why).
+  animCtrl.setAmplitudeSource(() => player.getAmplitude());
+  animCtrl.start();
+
   // 3. UI Elements
-  const stateLabel = document.getElementById('stateLabel') as HTMLElement;
-  const emotionLabel = document.getElementById('emotionLabel') as HTMLElement;
-  const connectionDot = document.getElementById('connectionDot') as HTMLElement;
-  const connectionText = document.getElementById('connectionText') as HTMLElement;
-  const tokenCountLabel = document.getElementById('tokenCountLabel') as HTMLElement;
-  const btnMic = document.getElementById('btnMic') as HTMLButtonElement;
-  const micLabel = document.getElementById('micLabel') as HTMLElement;
-  const chatForm = document.getElementById('chatForm') as HTMLFormElement;
-  const chatInput = document.getElementById('chatInput') as HTMLInputElement;
-  const devToggle = document.getElementById('devToggle') as HTMLButtonElement;
-  const devPanel = document.getElementById('devPanel') as HTMLElement;
+  const sidebar = document.getElementById('sidebar') as HTMLElement;
+  const btnToggleSidebar = document.getElementById('btnToggleSidebar') as HTMLButtonElement;
+  const btnOpenSidebar = document.getElementById('btnOpenSidebar') as HTMLButtonElement;
+  const btnClearTranscript = document.getElementById('btnClearTranscript') as HTMLButtonElement;
+  const btnToggleDebug = document.getElementById('btnToggleDebug') as HTMLButtonElement;
+  const listeningIndicator = document.getElementById('listeningIndicator') as HTMLElement;
 
-  // Latency Metrics
-  const metricStt = document.getElementById('metricStt') as HTMLElement;
-  const metricFirstToken = document.getElementById('metricFirstToken') as HTMLElement;
-  const metricLlmTotal = document.getElementById('metricLlmTotal') as HTMLElement;
-  const metricTts = document.getElementById('metricTts') as HTMLElement;
-  const metricTotal = document.getElementById('metricTotal') as HTMLElement;
-  const metricModel = document.getElementById('metricModel') as HTMLElement;
+  const statState = document.getElementById('statState') as HTMLElement;
+  const statEmotion = document.getElementById('statEmotion') as HTMLElement;
+  const statLatency = document.getElementById('statLatency') as HTMLElement;
 
-  let totalTokensGenerated = 0;
+  const devTextInput = document.getElementById('devTextInput') as HTMLElement;
+  const cliInput = document.getElementById('cliInput') as HTMLInputElement;
 
-  // 4. Bind State Changes
-  function updateUIState(state: EmotionState) {
-    stateLabel.textContent = state.state.toUpperCase();
-    emotionLabel.textContent = state.emotion.toUpperCase();
-    emotionCtrl.applyState(state);
+  // 4. Sidebar Toggle Logic
+  const urlParams = new URLSearchParams(window.location.search);
+  const initialSidebar = urlParams.get('sidebar');
+  const storedSidebar = localStorage.getItem('jimmy_sidebar');
+
+  if (initialSidebar === '0' || initialSidebar === 'false' || storedSidebar === 'collapsed') {
+    sidebar.classList.add('collapsed');
   }
 
-  connection.onStatusChange = (status) => {
-    connectionDot.className = `status-dot ${status}`;
-    connectionText.textContent = status.toUpperCase();
-  };
+  function toggleSidebar(forceState?: boolean) {
+    const isCollapsed = sidebar.classList.contains('collapsed');
+    const shouldCollapse = forceState !== undefined ? forceState : !isCollapsed;
+    if (shouldCollapse) {
+      sidebar.classList.add('collapsed');
+      localStorage.setItem('jimmy_sidebar', 'collapsed');
+    } else {
+      sidebar.classList.remove('collapsed');
+      localStorage.setItem('jimmy_sidebar', 'open');
+    }
+    // Trigger canvas resize after transition
+    setTimeout(() => {
+      renderer.handleResize();
+    }, 260);
+  }
+
+  btnToggleSidebar.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleSidebar(true);
+  });
+
+  btnOpenSidebar.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleSidebar(false);
+  });
+
+  btnClearTranscript.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    transcript.clear();
+    await fetch('/api/conversation/clear', { method: 'POST' }).catch(() => {});
+  });
+
+  // Debug log visibility (latency/system lines) — hidden by default so the
+  // log reads as a clean conversation transcript; toggle to see internals.
+  let showDebugLogs = localStorage.getItem('jimmy_debug_logs') === '1';
+  transcript.setShowSystemLogs(showDebugLogs);
+  btnToggleDebug.classList.toggle('active', showDebugLogs);
+
+  btnToggleDebug.addEventListener('click', (e) => {
+    e.stopPropagation();
+    showDebugLogs = !showDebugLogs;
+    transcript.setShowSystemLogs(showDebugLogs);
+    btnToggleDebug.classList.toggle('active', showDebugLogs);
+    localStorage.setItem('jimmy_debug_logs', showDebugLogs ? '1' : '0');
+  });
+
+  // 5. State Synchronization
+  function updateUIState(state: EmotionState) {
+    if (statState) statState.textContent = `STATE: ${state.state.toUpperCase()}`;
+    if (statEmotion) statEmotion.textContent = `EMO: ${state.emotion.toUpperCase()}`;
+    emotionCtrl.applyState(state);
+  }
 
   connection.onStateChange = (state) => {
     updateUIState(state);
   };
 
-  connection.onToken = (token) => {
-    transcript.appendStreamToken(token);
-  };
+  // Tokens arrive as raw structured-JSON fragments (the LLM speaks JSON, not
+  // plain text), so they are not human-readable mid-stream. Don't render them
+  // live; finalizeStreaming() below swaps in the clean parsed text once done.
+  connection.onToken = (_token) => {};
 
   connection.onEvent = (event) => {
     if (event.event_type === 'transcription' && event.text) {
@@ -76,59 +125,81 @@ document.addEventListener('DOMContentLoaded', () => {
         transcript.finalizeStreaming(event.text, event.emotion_state.emotion);
       }
       if (event.latency) {
-        metricStt.textContent = `${event.latency.stt_latency_ms} ms`;
-        metricFirstToken.textContent = `${event.latency.llm_first_token_ms} ms`;
-        metricLlmTotal.textContent = `${event.latency.llm_total_ms} ms`;
-        metricTts.textContent = `${event.latency.tts_latency_ms} ms`;
-        metricTotal.textContent = `${event.latency.total_pipeline_ms} ms`;
-        totalTokensGenerated += event.latency.tokens_generated;
-        tokenCountLabel.textContent = `${totalTokensGenerated} TOKENS`;
+        statLatency.textContent = `LATENCY: ${event.latency.total_pipeline_ms}ms`;
+        transcript.addSystemLog(
+          `latency: stt=${event.latency.stt_latency_ms}ms | first_token=${event.latency.llm_first_token_ms}ms | llm_total=${event.latency.llm_total_ms}ms | tts=${event.latency.tts_latency_ms}ms | total=${event.latency.total_pipeline_ms}ms`
+        );
       }
     }
   };
 
   connection.connect();
 
-  // 5. Audio Playback Event Handlers
+  // 6. Audio Playback Event Handlers
   player.onPlaybackStart = () => {
     emotionCtrl.forceState('speaking');
-    stateLabel.textContent = 'SPEAKING';
+    statState.textContent = 'STATE: SPEAKING';
   };
 
   player.onPlaybackEnd = () => {
+    animCtrl.clearSegmentSchedule();
     emotionCtrl.forceState('idle');
-    stateLabel.textContent = 'IDLE';
+    statState.textContent = 'STATE: IDLE';
     connection.notifySpeechFinished();
   };
 
-  // 6. Voice Recording Flow (Push-to-Talk)
+  /** Arms the per-segment emotion schedule for a reply that's about to
+   * play, so the eyes switch emotion in sync with which part of the (single
+   * concatenated) audio file is actually playing. No-op if the backend sent
+   * no segment timing (e.g. TTS synthesis failed but text still came back). */
+  function armSegmentSchedule(segments: SegmentTiming[] | undefined) {
+    if (!segments || segments.length === 0) return;
+    animCtrl.setSegmentSchedule(
+      segments,
+      () => player.getCurrentTimeMs(),
+      (seg) => {
+        emotionCtrl.applySegmentEmotion(seg.emotion, seg.intensity);
+        statEmotion.textContent = `EMO: ${seg.emotion.toUpperCase()}`;
+      }
+    );
+  }
+
+  // 7. Push-To-Talk Voice Flow (Click or Spacebar)
   let isRecording = false;
+  // Separate from isRecording: covers the window between stopRecording()
+  // (recording ends, isRecording already false) and the /api/voice-turn
+  // response coming back. Without this, a fast double-tap of Space/click
+  // during that window starts a SECOND recording while the first request
+  // is still in flight, firing two overlapping requests against the
+  // backend's single global robot state machine — observed in practice as
+  // a "Voice turn failed: Bad Request" (the second request's state
+  // transition gets rejected because the first one is still Thinking).
+  let isProcessing = false;
 
   async function startRecording() {
-    if (isRecording) return;
+    if (isRecording || isProcessing) return;
     const ok = await recorder.start();
     if (ok) {
       isRecording = true;
-      btnMic.classList.add('recording');
-      micLabel.textContent = 'LISTENING...';
-      connection.forceState('listening');
-      stateLabel.textContent = 'LISTENING';
-      emotionLabel.textContent = 'LISTENING';
+      listeningIndicator.classList.add('active');
+      emotionCtrl.forceState('listening');
+      statState.textContent = 'STATE: LISTENING';
+      statEmotion.textContent = 'EMO: LISTENING';
     }
   }
 
   function stopRecording() {
     if (!isRecording) return;
     isRecording = false;
-    btnMic.classList.remove('recording');
-    micLabel.textContent = 'PUSH TO TALK';
+    listeningIndicator.classList.remove('active');
     recorder.stop();
   }
 
   recorder.onRecordingStop = async (audioBlob) => {
+    isProcessing = true;
     emotionCtrl.forceState('thinking');
-    stateLabel.textContent = 'THINKING';
-    emotionLabel.textContent = 'THINKING';
+    statState.textContent = 'STATE: THINKING';
+    statEmotion.textContent = 'EMO: THINKING';
 
     const formData = new FormData();
     formData.append('audio', audioBlob, 'recording.webm');
@@ -145,23 +216,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const data = await response.json();
       if (data.latency) {
-        metricStt.textContent = `${data.latency.stt_latency_ms} ms`;
-        metricFirstToken.textContent = `${data.latency.llm_first_token_ms} ms`;
-        metricLlmTotal.textContent = `${data.latency.llm_total_ms} ms`;
-        metricTts.textContent = `${data.latency.tts_latency_ms} ms`;
-        metricTotal.textContent = `${data.latency.total_pipeline_ms} ms`;
-        totalTokensGenerated += data.latency.tokens_generated;
-        tokenCountLabel.textContent = `${totalTokensGenerated} TOKENS`;
+        statLatency.textContent = `LATENCY: ${data.latency.total_pipeline_ms}ms`;
+        transcript.addSystemLog(
+          `voice-turn latency: stt=${data.latency.stt_latency_ms}ms | llm=${data.latency.llm_total_ms}ms | tts=${data.latency.tts_latency_ms}ms | total=${data.latency.total_pipeline_ms}ms`
+        );
       }
 
+      // Release the lock here, once the backend round trip is done — this
+      // is the window that mattered for the concurrent-request bug. Audio
+      // playback happening after this is fine to interrupt via a new
+      // recording (barge-in).
+      isProcessing = false;
+
       if (data.audio_base64) {
+        armSegmentSchedule(data.segments);
         await player.playBase64(data.audio_base64);
       } else {
         emotionCtrl.forceState('idle');
-        stateLabel.textContent = 'IDLE';
+        statState.textContent = 'STATE: IDLE';
       }
     } catch (err: any) {
       console.error('Voice turn error:', err);
+      transcript.addSystemLog(`ERROR: ${err.message}`);
+      isProcessing = false;
       emotionCtrl.applyState({
         state: 'error',
         emotion: 'error',
@@ -173,46 +250,51 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   recorder.onError = (err) => {
-    console.error('Microphone recorder error:', err);
+    console.error('Audio recorder error:', err);
+    transcript.addSystemLog(`MIC ERROR: ${err.message}`);
     stopRecording();
-    alert(`Microphone error: ${err.message}`);
   };
 
-  // PTT Button interactions
-  btnMic.addEventListener('mousedown', (e) => {
-    e.preventDefault();
+  // Face click to toggle or hold to record
+  faceStage.addEventListener('mousedown', (e) => {
+    // Ignore clicks on developer input
+    if ((e.target as HTMLElement).closest('.dev-text-input')) return;
     startRecording();
   });
+
   window.addEventListener('mouseup', () => {
     if (isRecording) {
       stopRecording();
     }
   });
 
-  // Touch support for mobile / touchpads
-  btnMic.addEventListener('touchstart', (e) => {
+  // Touch screen support
+  faceStage.addEventListener('touchstart', (e) => {
+    if ((e.target as HTMLElement).closest('.dev-text-input')) return;
     e.preventDefault();
     startRecording();
   });
+
   window.addEventListener('touchend', () => {
     if (isRecording) {
       stopRecording();
     }
   });
 
-  // 7. Text Chat Form (Fallback)
-  chatForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const text = chatInput.value.trim();
+  // 8. Developer Text Input (Toggled with 'T')
+  async function submitTextInput() {
+    const text = cliInput.value.trim();
     if (!text) return;
 
-    chatInput.value = '';
+    cliInput.value = '';
+    devTextInput.classList.add('hidden');
+
     transcript.addMessage('user', text);
     transcript.startStreamingAssistant();
 
     emotionCtrl.forceState('thinking');
-    stateLabel.textContent = 'THINKING';
-    emotionLabel.textContent = 'THINKING';
+    statState.textContent = 'STATE: THINKING';
+    statEmotion.textContent = 'EMO: THINKING';
 
     try {
       const resp = await fetch('/api/chat', {
@@ -229,31 +311,35 @@ document.addEventListener('DOMContentLoaded', () => {
       transcript.finalizeStreaming(data.message, data.emotion);
 
       if (data.latency) {
-        metricFirstToken.textContent = `${data.latency.llm_first_token_ms} ms`;
-        metricLlmTotal.textContent = `${data.latency.llm_total_ms} ms`;
-        metricTts.textContent = `${data.latency.tts_latency_ms} ms`;
-        metricTotal.textContent = `${data.latency.total_pipeline_ms} ms`;
-        totalTokensGenerated += data.latency.tokens_generated;
-        tokenCountLabel.textContent = `${totalTokensGenerated} TOKENS`;
+        statLatency.textContent = `LATENCY: ${data.latency.total_pipeline_ms}ms`;
+        transcript.addSystemLog(
+          `chat latency: first_token=${data.latency.llm_first_token_ms}ms | llm_total=${data.latency.llm_total_ms}ms | tts=${data.latency.tts_latency_ms}ms | total=${data.latency.total_pipeline_ms}ms`
+        );
       }
 
-      emotionCtrl.applyState({
-        state: 'speaking',
-        emotion: data.emotion,
-        intensity: data.intensity,
-        gaze: data.gaze,
-      });
+      // Stage the FIRST segment's emotion/gaze now (not the overall/last
+      // one — that's what should be showing the instant speech starts),
+      // but don't flip eyes.speaking on until playback actually starts
+      // (player.onPlaybackStart below handles that) — otherwise the eyes
+      // visibly start "talking" before any audio decode/playback has
+      // actually begun.
+      const firstSegment = data.segments?.[0];
+      emotionCtrl.stageEmotion(
+        firstSegment?.emotion ?? data.emotion,
+        firstSegment?.intensity ?? data.intensity,
+        data.gaze
+      );
 
       if (data.audio_base64) {
+        armSegmentSchedule(data.segments);
         await player.playBase64(data.audio_base64);
       } else {
-        setTimeout(() => {
-          emotionCtrl.forceState('idle');
-          stateLabel.textContent = 'IDLE';
-        }, 1500);
+        emotionCtrl.forceState('idle');
+        statState.textContent = 'STATE: IDLE';
       }
     } catch (err: any) {
       console.error('Chat error:', err);
+      transcript.addSystemLog(`ERROR: ${err.message}`);
       emotionCtrl.applyState({
         state: 'error',
         emotion: 'error',
@@ -262,46 +348,71 @@ document.addEventListener('DOMContentLoaded', () => {
       });
       setTimeout(() => emotionCtrl.forceState('idle'), 2500);
     }
+  }
+
+  cliInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      submitTextInput();
+    } else if (e.key === 'Escape') {
+      devTextInput.classList.add('hidden');
+      cliInput.value = '';
+    }
   });
 
-  // 8. Developer Panel & Manual Controls
-  devToggle.addEventListener('click', () => {
-    devPanel.classList.toggle('open');
-  });
+  // 9. Keyboard Controls (Space = PTT, D = Sidebar, T = Text, 1-9 = Emotions)
+  let spaceHeld = false;
 
-  document.querySelectorAll('.btn-dev[data-emotion]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const emo = (btn as HTMLElement).dataset.emotion as RobotEmotion;
-      connection.forceEmotion(emo, 0.8, 'center');
-    });
-  });
+  window.addEventListener('keydown', (e) => {
+    // If typing in input, only Escape or Enter matters
+    if (document.activeElement === cliInput) {
+      return;
+    }
 
-  document.querySelectorAll('.btn-dev[data-gaze]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const gaze = (btn as HTMLElement).dataset.gaze as GazeDirection;
-      connection.forceGaze(gaze);
-    });
-  });
-
-  document.getElementById('btnDevBlink')?.addEventListener('click', () => {
-    emotionCtrl.triggerBlink();
-  });
-
-  document.getElementById('btnClearChat')?.addEventListener('click', async () => {
-    transcript.clear();
-    await fetch('/api/conversation/clear', { method: 'POST' });
-  });
-
-  // Fetch initial config and messages for developer panel and transcript
-  fetch('/api/status')
-    .then((r) => r.json())
-    .then((d) => {
-      if (d.config?.llm_model) {
-        metricModel.textContent = d.config.llm_model;
+    if (e.code === 'Space' && !spaceHeld) {
+      e.preventDefault();
+      spaceHeld = true;
+      startRecording();
+    } else if (e.key === 'd' || e.key === 'D') {
+      e.preventDefault();
+      toggleSidebar();
+    } else if (e.key === 't' || e.key === 'T') {
+      e.preventDefault();
+      devTextInput.classList.toggle('hidden');
+      if (!devTextInput.classList.contains('hidden')) {
+        cliInput.focus();
       }
-    })
-    .catch(() => {});
+    } else if (e.key === '0') {
+      emotionCtrl.triggerBlink();
+    } else if (e.key >= '1' && e.key <= '9') {
+      const emoMap: Record<string, RobotEmotion> = {
+        '1': 'neutral',
+        '2': 'happy',
+        '3': 'curious',
+        '4': 'thinking',
+        '5': 'angry',
+        '6': 'confused',
+        '7': 'sad',
+        '8': 'surprised',
+        '9': 'sleepy',
+      };
+      const emo = emoMap[e.key];
+      if (emo) {
+        emotionCtrl.forceEmotion(emo, 0.8, 'center');
+        transcript.addSystemLog(`Manual emotion override: ${emo.toUpperCase()}`);
+      }
+    }
+  });
 
+  window.addEventListener('keyup', (e) => {
+    if (e.code === 'Space') {
+      e.preventDefault();
+      spaceHeld = false;
+      stopRecording();
+    }
+  });
+
+  // Initial load of existing conversation
   fetch('/api/conversation')
     .then((r) => r.json())
     .then((msgs: any[]) => {
@@ -310,4 +421,15 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     })
     .catch(() => {});
+
+  // Expose for developer testing & programmatic control
+  (window as any).jimmy = {
+    emotionCtrl,
+    eyes,
+    renderer,
+    transcript,
+    recorder,
+    player,
+    toggleSidebar,
+  };
 });

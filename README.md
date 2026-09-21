@@ -28,7 +28,7 @@ Return to Idle Automatically
 
 - **100% Local Inference**: Runs entirely on the host machine (optimized for NVIDIA RTX 4060 / CPU). No cloud dependencies.
 - **Expressive OLED Face**: Canonical 128×64 logical resolution canvas adapted from the open-source **FluxGarage RoboEyes** library (GPL-3.0), ready to be transferred directly to physical 128x64 SSD1306/SSD1327 OLED screens in future phases.
-- **Sub-Second LLM Latency**: First token typically emitted in **~270–320 ms**; full response completed in under **1 second**.
+- **LLM Latency (RTX 4060, GPU — confirmed via `ollama ps` showing `100% GPU`)**: warm first token **46–70 ms**, full `/api/chat` round trip including TTS **1.3–2.6 s**. Note: the dGPU is powered off by default on this laptop to save battery — if you ever see multi-second latency, run `ollama ps` first and confirm it says GPU, not CPU. See `docs/performance.md` for the CPU-fallback numbers and how GPU access is wired up (a dedicated Ollama instance on port 11435, separate from any other Ollama instance on this machine — see `docs/performance.md`'s "Dedicated Ollama instance" section for why).
 - **Distinct Personality**: Dedicated prompt inspired by Rocky's character characteristics (concise, direct, highly intelligent, simple grammar, occasional repetition for emphasis, original dialogue).
 - **Structured Emotion System**: Backend validates explicit states (`neutral`, `happy`, `sad`, `angry`, `surprised`, `curious`, `confused`, `sleepy`, `thinking`, `listening`, `speaking`, `error`) and gaze directions.
 - **Deterministic Mock Mode**: The entire UI and API can be run and tested without any GPU, models, microphone, or external services.
@@ -41,7 +41,7 @@ Return to Idle Automatically
 - Rust (1.80+)
 - Node.js (v20+)
 - Python 3.12 with `uv`
-- Ollama with `qwen2.5:3b`
+- Ollama with `qwen2.5:7b-instruct-q4_K_M`
 
 ### 2. Setup
 ```bash
@@ -57,8 +57,12 @@ mkdir -p models
 curl -L -o models/kokoro-v1.0.onnx https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
 curl -L -o models/voices-v1.0.bin https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
 
-# Pull local Qwen2.5 3B model
-ollama pull qwen2.5:3b
+# Pull the model into Jimmy's OWN dedicated Ollama instance (port 11435),
+# not your default one on 11434. This matters: if you already run Ollama
+# system-wide with tuning for other/larger models (e.g. quantized KV cache
+# to fit big models in VRAM), that tuning measurably corrupts this model's
+# output. See docs/performance.md's "Dedicated Ollama instance" section.
+OLLAMA_HOST=127.0.0.1:11435 OLLAMA_MODELS="$HOME/.ollama-jimmy" ollama pull qwen2.5:7b-instruct-q4_K_M
 
 # 3. Build frontend
 npm --prefix frontend install
@@ -69,9 +73,17 @@ cargo build --manifest-path backend/Cargo.toml
 ```
 
 ### 3. Running Rocky
+
+`start.sh` starts everything (Jimmy's dedicated Ollama instance on 11435,
+the STT/TTS service, and the backend) in one shot:
 ```bash
-# Terminal 1: Ollama
-ollama serve
+./start.sh
+```
+
+Or manually, in separate terminals:
+```bash
+# Terminal 1: Jimmy's dedicated Ollama instance (NOT the system default)
+OLLAMA_HOST=127.0.0.1:11435 OLLAMA_MODELS="$HOME/.ollama-jimmy" ollama serve
 
 # Terminal 2: Local STT & TTS Service
 services/.venv/bin/python services/stt_tts_service.py
@@ -79,6 +91,14 @@ services/.venv/bin/python services/stt_tts_service.py
 # Terminal 3: Rocky Rust Backend
 backend/target/debug/rocky-backend
 ```
+
+For frontend iteration with hot-reload, also run `npm --prefix frontend run dev`
+and use `http://127.0.0.1:5173` instead of `:3000` — Vite proxies `/api` and
+`/ws` through to the backend automatically.
+
+Note: on hybrid-graphics laptops the dGPU may be powered off by default.
+Check `ollama ps` after your first request — it should say `100% GPU`, not
+`100% CPU`. See `docs/performance.md` if it doesn't.
 
 Open **`http://127.0.0.1:3000`** in your browser.
 

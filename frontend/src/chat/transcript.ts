@@ -1,135 +1,151 @@
 /**
- * TranscriptManager: Handles rendering the conversation stream and message history.
+ * RawTranscriptManager: Handles rendering the internal raw conversation
+ * transcript stream in clean monospace log format.
  */
 
-import { RobotEmotion } from '../face/types';
-
-export interface DisplayMessage {
+export interface LogLine {
   id: string;
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-  emotion?: RobotEmotion;
+  source: 'USER' | 'JIMMY' | 'SYS';
+  text: string;
+  meta?: string;
   timestamp: string;
   isStreaming?: boolean;
 }
 
 export class TranscriptManager {
   private container: HTMLElement;
-  private messages: DisplayMessage[] = [];
+  private entries: LogLine[] = [];
+  private showSystemLogs = true;
 
   constructor(container: HTMLElement) {
     this.container = container;
   }
 
-  addMessage(role: 'user' | 'assistant' | 'system', content: string, emotion?: RobotEmotion): DisplayMessage {
-    const msg: DisplayMessage = {
-      id: Math.random().toString(36).substring(2, 9),
-      role,
-      content,
-      emotion,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-      isStreaming: false,
-    };
-    this.messages.push(msg);
+  setShowSystemLogs(show: boolean) {
+    this.showSystemLogs = show;
     this.render();
-    return msg;
   }
 
-  startStreamingAssistant(initialContent: string = ''): DisplayMessage {
-    const msg: DisplayMessage = {
+  addMessage(role: 'user' | 'assistant' | 'system', content: string, emotion?: string): LogLine {
+    const source = role === 'user' ? 'USER' : role === 'assistant' ? 'JIMMY' : 'SYS';
+    const entry: LogLine = {
       id: Math.random().toString(36).substring(2, 9),
-      role: 'assistant',
-      content: initialContent,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      source,
+      text: content,
+      meta: emotion ? `[${emotion.toUpperCase()}]` : undefined,
+      timestamp: new Date().toLocaleTimeString([], { hour12: false }),
+      isStreaming: false,
+    };
+    this.entries.push(entry);
+    this.render();
+    return entry;
+  }
+
+  addSystemLog(text: string): LogLine {
+    const entry: LogLine = {
+      id: Math.random().toString(36).substring(2, 9),
+      source: 'SYS',
+      text,
+      timestamp: new Date().toLocaleTimeString([], { hour12: false }),
+      isStreaming: false,
+    };
+    this.entries.push(entry);
+    this.render();
+    return entry;
+  }
+
+  startStreamingAssistant(initialContent: string = ''): LogLine {
+    const entry: LogLine = {
+      id: Math.random().toString(36).substring(2, 9),
+      source: 'JIMMY',
+      text: initialContent,
+      timestamp: new Date().toLocaleTimeString([], { hour12: false }),
       isStreaming: true,
     };
-    this.messages.push(msg);
+    this.entries.push(entry);
     this.render();
-    return msg;
+    return entry;
   }
 
   appendStreamToken(token: string) {
-    const last = this.messages[this.messages.length - 1];
-    if (last && last.role === 'assistant' && last.isStreaming) {
-      last.content += token;
-      this.updateLastMessage(last);
+    const last = this.entries[this.entries.length - 1];
+    if (last && last.source === 'JIMMY' && last.isStreaming) {
+      last.text += token;
+      this.updateLastEntry(last);
     }
   }
 
-  finalizeStreaming(finalText: string, emotion?: RobotEmotion) {
-    const last = this.messages[this.messages.length - 1];
-    if (last && last.role === 'assistant') {
-      last.content = finalText;
-      last.emotion = emotion;
+  finalizeStreaming(finalText: string, emotion?: string) {
+    const last = this.entries[this.entries.length - 1];
+    if (last && last.source === 'JIMMY') {
+      last.text = finalText;
+      if (emotion) {
+        last.meta = `[${emotion.toUpperCase()}]`;
+      }
       last.isStreaming = false;
       this.render();
     }
   }
 
   clear() {
-    this.messages = [];
+    this.entries = [];
     this.render();
   }
 
-  private updateLastMessage(msg: DisplayMessage) {
+  private updateLastEntry(entry: LogLine) {
     const lastEl = this.container.lastElementChild as HTMLElement;
     if (lastEl) {
-      const contentEl = lastEl.querySelector('.msg-content');
-      if (contentEl) {
-        contentEl.textContent = msg.content;
+      const textEl = lastEl.querySelector('.log-text');
+      if (textEl) {
+        textEl.textContent = entry.text;
+        const cursor = document.createElement('span');
+        cursor.className = 'streaming-cursor';
+        cursor.textContent = ' ▍';
+        textEl.appendChild(cursor);
         this.scrollToBottom();
       }
     }
   }
 
+  // Single compact line per entry: "TAG  text". Monochrome — weight and
+  // opacity distinguish speaker/system rather than color, matching the
+  // rest of the UI (no accent colors anywhere else in the app).
   private render() {
     this.container.innerHTML = '';
-    if (this.messages.length === 0) {
-      const placeholder = document.createElement('div');
-      placeholder.className = 'transcript-empty';
-      placeholder.textContent = 'Awaiting vocal transmission or text inquiry...';
-      this.container.appendChild(placeholder);
+    const visible = this.showSystemLogs
+      ? this.entries
+      : this.entries.filter((e) => e.source !== 'SYS');
+
+    if (visible.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'log-empty';
+      empty.textContent = this.showSystemLogs ? 'No activity yet.' : 'No activity yet. (Debug log hidden)';
+      this.container.appendChild(empty);
       return;
     }
 
-    for (const msg of this.messages) {
-      const item = document.createElement('div');
-      item.className = `transcript-item msg-${msg.role}`;
+    for (const entry of visible) {
+      const el = document.createElement('div');
+      el.className = `log-entry log-entry--${entry.source.toLowerCase()}`;
 
-      const header = document.createElement('div');
-      header.className = 'msg-header';
+      const tag = document.createElement('span');
+      tag.className = 'log-tag';
+      tag.textContent = entry.source === 'JIMMY' && entry.meta ? `JIMMY ${entry.meta}` : entry.source;
+      el.appendChild(tag);
 
-      const roleLabel = document.createElement('span');
-      roleLabel.className = 'msg-role';
-      roleLabel.textContent = msg.role === 'user' ? 'YOU' : 'JIMMY';
+      const text = document.createElement('span');
+      text.className = 'log-text';
+      text.textContent = entry.text;
 
-      const timeLabel = document.createElement('span');
-      timeLabel.className = 'msg-time';
-      timeLabel.textContent = msg.timestamp;
-
-      header.appendChild(roleLabel);
-      if (msg.emotion) {
-        const emoTag = document.createElement('span');
-        emoTag.className = `msg-emotion-tag emo-${msg.emotion}`;
-        emoTag.textContent = msg.emotion.toUpperCase();
-        header.appendChild(emoTag);
-      }
-      header.appendChild(timeLabel);
-
-      const content = document.createElement('div');
-      content.className = 'msg-content';
-      content.textContent = msg.content;
-
-      if (msg.isStreaming) {
+      if (entry.isStreaming) {
         const cursor = document.createElement('span');
         cursor.className = 'streaming-cursor';
         cursor.textContent = ' ▍';
-        content.appendChild(cursor);
+        text.appendChild(cursor);
       }
 
-      item.appendChild(header);
-      item.appendChild(content);
-      this.container.appendChild(item);
+      el.appendChild(text);
+      this.container.appendChild(el);
     }
 
     this.scrollToBottom();
