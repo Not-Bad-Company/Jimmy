@@ -182,7 +182,18 @@ document.addEventListener('DOMContentLoaded', () => {
     if (ok) {
       isRecording = true;
       listeningIndicator.classList.add('active');
-      emotionCtrl.forceState('listening');
+      // forceState('listening') alone only toggles operational flags
+      // (gaze/speaking/thinking) — it keeps whatever mood emotion was
+      // already showing rather than switching to the dedicated
+      // "listening" look (bigger attentive eyes, raised brows) built for
+      // this state, which is why holding space never looked distinct from
+      // just sitting idle in whatever emotion Jimmy last had. Apply both.
+      emotionCtrl.applyState({
+        state: 'listening',
+        emotion: 'listening',
+        intensity: 0.7,
+        gaze: 'center',
+      });
       statState.textContent = 'STATE: LISTENING';
       statEmotion.textContent = 'EMO: LISTENING';
     }
