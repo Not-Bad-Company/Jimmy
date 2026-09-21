@@ -12,6 +12,7 @@ use crate::ai::tts::SegmentTiming;
 use crate::conversation::ChatMessage;
 use crate::robot::emotion::{GazeDirection, RobotEmotion, RobotState};
 use crate::robot::RobotEvent;
+use crate::speaker::extract_name;
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -387,10 +388,22 @@ pub async fn voice_turn_handler(
         return Err((StatusCode::BAD_REQUEST, "No audio provided".into()));
     }
 
-    // 2. Transition to Thinking & transcribe audio with STT
+    // 2. Transition to Thinking. Transcribe with STT and identify the
+    // speaker's voice concurrently — independent operations on the same
+    // audio, no reason to pay their latencies sequentially. Speaker ID
+    // always goes to the local service regardless of which STTProvider is
+    // configured for transcription (see SpeakerIdClient's doc comment).
     state.state_machine.set_thinking().await;
     let stt_start = Instant::now();
-    let stt_res = match state.stt.transcribe(audio_bytes, &file_name).await {
+    let audio_for_id = audio_bytes.clone();
+    let file_name_for_id = file_name.clone();
+
+    let (stt_result, identify_result) = tokio::join!(
+        state.stt.transcribe(audio_bytes, &file_name),
+        state.speaker_id_client.identify(audio_for_id, &file_name_for_id)
+    );
+
+    let stt_res = match stt_result {
         Ok(res) => res,
         Err(e) => {
             error!("STT error: {}", e);
@@ -405,6 +418,42 @@ pub async fn voice_turn_handler(
         }
     };
     let stt_latency = stt_start.elapsed().as_millis() as u64;
+
+    // Speaker identification failure degrades to "unknown speaker" and
+    // never fails the turn — same principle as TTS/STT fallback handling
+    // elsewhere in this file.
+    let speaker_match = match identify_result {
+        Ok(fingerprint) => match state.speaker_store.find_best_match(&fingerprint) {
+            Ok(Some(m)) => {
+                let _ = state.speaker_store.touch_last_seen(m.speaker_id);
+                Some(m)
+            }
+            Ok(None) => {
+                // New voice — enroll it now (unnamed) so even before a
+                // name is known, re-encountering this voice is recognized
+                // as "the same person as last time".
+                match state.speaker_store.enroll(&fingerprint, None) {
+                    Ok(id) => Some(crate::speaker::SpeakerMatch {
+                        speaker_id: id,
+                        name: None,
+                        confidence: 1.0,
+                    }),
+                    Err(e) => {
+                        warn!("Failed to enroll new speaker: {}", e);
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Speaker match lookup failed: {}", e);
+                None
+            }
+        },
+        Err(e) => {
+            warn!("Speaker identification unavailable: {}", e);
+            None
+        }
+    };
 
     let transcribed_text = stt_res.text.trim().to_string();
     info!("STT Result: '{}' in {}ms", transcribed_text, stt_latency);
@@ -424,7 +473,26 @@ pub async fn voice_turn_handler(
         latency: None,
     });
 
-    // 3. Add user message (may start a fresh session — see chat_handler)
+    // 3. If this speaker is known but unnamed, see if THIS message offers
+    // a name (best-effort — see extract_name's doc comment for why this
+    // runs unconditionally rather than only when a name was just asked
+    // for). Do this before adding the message to history so the stored
+    // system-prompt note below reflects the freshly-learned name.
+    let mut speaker_name: Option<String> = speaker_match.as_ref().and_then(|m| m.name.clone());
+    if let Some(ref m) = speaker_match {
+        if m.name.is_none() {
+            if let Some(name) = extract_name(&transcribed_text) {
+                if let Err(e) = state.speaker_store.set_name(m.speaker_id, &name) {
+                    warn!("Failed to save speaker name: {}", e);
+                } else {
+                    info!("Learned speaker name: {}", name);
+                    speaker_name = Some(name);
+                }
+            }
+        }
+    }
+
+    // 4. Add user message (may start a fresh session — see chat_handler)
     let (_, started_new_session) = state
         .conversation
         .add_message("user", &transcribed_text, None)
@@ -433,10 +501,20 @@ pub async fn voice_turn_handler(
         info!("Idle timeout exceeded — started a fresh conversation session");
     }
 
-    // 4. Fetch context
+    // 5. Fetch context
     let history = state.conversation.get_recent_messages(6).await;
 
-    // 5. LLM Response
+    // Speaker-aware system prompt for THIS turn only — appended, not
+    // written back to the prompt file, since it varies every request.
+    let speaker_note = match &speaker_name {
+        Some(name) => format!(
+            "\n\n## Current Speaker\nYou know who this is: {name}. Address them naturally as yourself would with someone you know — you don't need to re-introduce yourself or ask their name again."
+        ),
+        None => "\n\n## Current Speaker\nYou do not recognize this voice. Naturally work finding out their name into the conversation somewhere in this reply or the next few — don't interrogate, don't break character, don't make it the whole reply unless it fits naturally.".to_string(),
+    };
+    let turn_system_prompt = format!("{}{}", state.system_prompt, speaker_note);
+
+    // 6. LLM Response
     let token_tx = {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(50);
         let sm = state.state_machine.clone();
@@ -458,7 +536,7 @@ pub async fn voice_turn_handler(
     let llm_res = match state
         .llm
         .generate_response(
-            &state.system_prompt,
+            &turn_system_prompt,
             &history[..history.len() - 1],
             &transcribed_text,
             token_tx,
@@ -479,7 +557,7 @@ pub async fn voice_turn_handler(
         }
     };
 
-    // 6. TTS Synthesis, BEFORE recording/broadcasting the response (see the
+    // 7. TTS Synthesis, BEFORE recording/broadcasting the response (see the
     // matching comment in chat_handler() — a TTS rejection substitutes a
     // rejection line, and stored/broadcast/returned text must match what
     // was actually spoken).
@@ -505,13 +583,13 @@ pub async fn voice_turn_handler(
         }
     }
 
-    // 7. Record the response actually spoken.
+    // 8. Record the response actually spoken.
     state
         .conversation
         .add_message("assistant", &final_text, Some(final_emotion))
         .await;
 
-    // 8. Transition to Speaking only if there's actually audio to play — see
+    // 9. Transition to Speaking only if there's actually audio to play — see
     // the matching comment in chat_handler() for why (TTS failure must not
     // leave clients stuck animating speech over silence).
     if audio_base64.is_some() {
