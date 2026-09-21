@@ -432,4 +432,19 @@ document.addEventListener('DOMContentLoaded', () => {
     player,
     toggleSidebar,
   };
+
+  // Debug affordance: ?emotion=happy&intensity=0.8 forces that emotion on
+  // load, for screenshotting/testing a specific face state directly
+  // without manually driving a conversation there first. Delayed because
+  // the WS connection's initial_state sync (connection.connect() above)
+  // arrives asynchronously right after load and would otherwise stomp this
+  // forced state back to whatever the server's real idle state is.
+  const debugEmotion = urlParams.get('emotion') as RobotEmotion | null;
+  if (debugEmotion) {
+    const debugIntensity = parseFloat(urlParams.get('intensity') || '0.8');
+    setTimeout(() => {
+      emotionCtrl.forceEmotion(debugEmotion, debugIntensity, 'center');
+      emotionCtrl.forceState('speaking');
+    }, 600);
+  }
 });

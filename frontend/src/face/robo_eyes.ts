@@ -14,9 +14,19 @@
 import { GazeDirection, RobotEmotion } from './types';
 
 export class RoboEyes {
-  // Screen size (canonical OLED 128x64)
+  // Screen size (canonical OLED 128x64) — stays fixed at this exact
+  // resolution because it's meant to map 1:1 onto a real SSD1306/SSD1327
+  // OLED later; layout changes below reallocate space WITHIN 128x64
+  // rather than growing the canvas.
   readonly screenWidth = 128;
   readonly screenHeight = 64;
+
+  // Vertical layout budget: the eyes get the middle band, leaving a fixed
+  // margin above for eyebrows and below for the mouth. Eye wander/gaze is
+  // clamped to this band (see getScreenConstraintY/setPosition) so eyes
+  // can never drift far enough to overlap the new elements.
+  readonly eyeBandTop = 10;
+  readonly eyeBandBottom = 56;
 
   // Colors
   bgColor = '#000000';
@@ -81,6 +91,48 @@ export class RoboEyes {
   eyelidsAngryHeightNext = 0;
   eyelidsHappyBottomOffset = 0;
   eyelidsHappyBottomOffsetNext = 0;
+
+  // Eyebrows: a small rounded bar above each eye, secondary to the eyes
+  // (thin, no glow). Two knobs per side, each with the usual
+  // Default/Current/Next smoothing:
+  //  - tiltL/tiltR: how much the inner end (the one nearer the nose)
+  //    droops relative to the outer end. Positive = inner end LOWER,
+  //    which reads as a classic angry "V" when both sides use the same
+  //    positive value; negative = inner end raised, reading as
+  //    worried/sad. Independent per side so asymmetric looks (skeptical,
+  //    confused) are possible, matching how eye height is already
+  //    independent per side for those emotions.
+  //  - raiseL/raiseR: vertical shift of that whole brow (negative = up).
+  browHeight = 3;
+  browGap = 2; // gap between brow bottom edge and the eye band's top edge
+  browTiltLDefault = 0;
+  browTiltLCurrent = 0;
+  browTiltLNext = 0;
+  browTiltRDefault = 0;
+  browTiltRCurrent = 0;
+  browTiltRNext = 0;
+  browRaiseLDefault = 0;
+  browRaiseLCurrent = 0;
+  browRaiseLNext = 0;
+  browRaiseRDefault = 0;
+  browRaiseRCurrent = 0;
+  browRaiseRNext = 0;
+
+  // Mouth: a single bar centered under the eyes, drawn with the same
+  // quadratic-curve technique the happy eyelid crescent already uses —
+  // positive curve bows the bar into a "cup" (smile), negative bows it
+  // into a "cap" (frown). `open` swaps it for a small rounded square
+  // (surprised/excited "O" mouth) instead of the curved bar.
+  mouthWidthDefault = 32;
+  mouthWidthCurrent = 32;
+  mouthWidthNext = 32;
+  mouthHeightDefault = 3;
+  mouthHeightCurrent = 3;
+  mouthHeightNext = 3;
+  mouthCurveDefault = 0;
+  mouthCurveCurrent = 0;
+  mouthCurveNext = 0;
+  mouthOpen = false;
 
   // Blinking
   eyeL_open = true;
@@ -162,50 +214,51 @@ export class RoboEyes {
   }
 
   getScreenConstraintY(): number {
-    return this.screenHeight - this.eyeLheightDefault;
+    return this.eyeBandBottom - this.eyeBandTop - this.eyeLheightDefault;
   }
 
   setPosition(gaze: GazeDirection) {
     const maxX = this.getScreenConstraintX();
     const maxY = this.getScreenConstraintY();
+    const top = this.eyeBandTop;
 
     switch (gaze) {
       case 'up':
         this.eyeLxNext = Math.floor(maxX / 2);
-        this.eyeLyNext = 0;
+        this.eyeLyNext = top;
         break;
       case 'up-right':
         this.eyeLxNext = maxX;
-        this.eyeLyNext = 0;
+        this.eyeLyNext = top;
         break;
       case 'right':
         this.eyeLxNext = maxX;
-        this.eyeLyNext = Math.floor(maxY / 2);
+        this.eyeLyNext = top + Math.floor(maxY / 2);
         break;
       case 'down-right':
         this.eyeLxNext = maxX;
-        this.eyeLyNext = maxY;
+        this.eyeLyNext = top + maxY;
         break;
       case 'down':
         this.eyeLxNext = Math.floor(maxX / 2);
-        this.eyeLyNext = maxY;
+        this.eyeLyNext = top + maxY;
         break;
       case 'down-left':
         this.eyeLxNext = 0;
-        this.eyeLyNext = maxY;
+        this.eyeLyNext = top + maxY;
         break;
       case 'left':
         this.eyeLxNext = 0;
-        this.eyeLyNext = Math.floor(maxY / 2);
+        this.eyeLyNext = top + Math.floor(maxY / 2);
         break;
       case 'up-left':
         this.eyeLxNext = 0;
-        this.eyeLyNext = 0;
+        this.eyeLyNext = top;
         break;
       case 'center':
       default:
         this.eyeLxNext = Math.floor(maxX / 2);
-        this.eyeLyNext = Math.floor(maxY / 2);
+        this.eyeLyNext = top + Math.floor(maxY / 2);
         break;
     }
   }
@@ -228,25 +281,57 @@ export class RoboEyes {
     this.eyeRheightDefault = 36;
     this.eyeLwidthDefault = 36;
     this.eyeRwidthDefault = 36;
-    this.eyeLborderRadiusDefault = 8;
-    this.eyeRborderRadiusDefault = 8;
+    // A high default radius (clamped to half the shape's own height/width
+    // in draw(), so this is a ceiling, not a fixed value) makes the default
+    // "pill"-shaped rather than a rounded square — softer, closer to the
+    // smooth glowing-capsule look real OLED robot-face eyes go for. Cases
+    // below that want a visibly different silhouette (surprised's fuller
+    // roundness, sleepy's slit, curious's asymmetry) still override it.
+    this.eyeLborderRadiusDefault = 16;
+    this.eyeRborderRadiusDefault = 16;
+
+    // Reset brows/mouth to neutral before the switch below overrides them —
+    // same pattern as the eye geometry reset above.
+    this.browTiltLDefault = 0;
+    this.browTiltRDefault = 0;
+    this.browRaiseLDefault = 0;
+    this.browRaiseRDefault = 0;
+    this.mouthWidthDefault = 32;
+    this.mouthHeightDefault = 3;
+    this.mouthCurveDefault = 0;
+    this.mouthOpen = false;
 
     switch (emotion) {
       case 'happy':
         this.happy = true;
         this.eyeLheightDefault = Math.round(32 + intensity * 4);
         this.eyeRheightDefault = Math.round(32 + intensity * 4);
+        this.browRaiseLDefault = -1;
+        this.browRaiseRDefault = -1;
+        this.mouthWidthDefault = Math.round(38 + intensity * 8);
+        this.mouthHeightDefault = 4;
+        this.mouthCurveDefault = Math.round(2 + intensity * 2);
         break;
       case 'angry':
         this.angry = true;
         this.eyeLheightDefault = Math.round(24 + (1 - intensity) * 6);
         this.eyeRheightDefault = Math.round(24 + (1 - intensity) * 6);
+        this.browTiltLDefault = Math.round(3 + intensity * 2);
+        this.browTiltRDefault = Math.round(3 + intensity * 2);
+        this.mouthWidthDefault = 30;
+        this.mouthCurveDefault = -2;
         break;
       case 'sad':
         this.sad = true;
         this.tired = true;
         this.eyeLheightDefault = Math.round(24 + (1 - intensity) * 6);
         this.eyeRheightDefault = Math.round(24 + (1 - intensity) * 6);
+        this.browTiltLDefault = -3;
+        this.browTiltRDefault = -3;
+        this.browRaiseLDefault = 1;
+        this.browRaiseRDefault = 1;
+        this.mouthWidthDefault = 30;
+        this.mouthCurveDefault = -4;
         break;
       case 'surprised':
         this.eyeLheightDefault = 46;
@@ -255,18 +340,28 @@ export class RoboEyes {
         this.eyeRwidthDefault = 38;
         this.eyeLborderRadiusDefault = 18;
         this.eyeRborderRadiusDefault = 18;
+        this.browRaiseLDefault = -4;
+        this.browRaiseRDefault = -4;
+        this.mouthOpen = true;
         break;
       case 'curious':
         this.curious = true;
         this.eyeLheightDefault = 38;
         this.eyeRheightDefault = 30;
-        this.eyeLborderRadiusDefault = 10;
-        this.eyeRborderRadiusDefault = 8;
+        this.eyeLborderRadiusDefault = 18;
+        this.eyeRborderRadiusDefault = 15;
+        this.browRaiseLDefault = -3;
+        this.mouthWidthDefault = 26;
+        this.mouthCurveDefault = 1;
         break;
       case 'confused':
         this.confused = true;
         this.eyeLheightDefault = 36;
         this.eyeRheightDefault = 24;
+        this.browTiltLDefault = 2;
+        this.browTiltRDefault = -2;
+        this.browRaiseRDefault = -2;
+        this.mouthWidthDefault = 24;
         this.animConfused();
         break;
       case 'sleepy':
@@ -275,22 +370,37 @@ export class RoboEyes {
         this.eyeRheightDefault = 10;
         this.eyeLborderRadiusDefault = 5;
         this.eyeRborderRadiusDefault = 5;
+        this.browRaiseLDefault = 2;
+        this.browRaiseRDefault = 2;
+        this.mouthWidthDefault = 18;
+        this.mouthHeightDefault = 2;
         break;
       case 'thinking':
         this.thinking = true;
         this.eyeLheightDefault = 30;
         this.eyeRheightDefault = 30;
+        this.browTiltLDefault = 1;
+        this.browTiltRDefault = -1;
+        this.browRaiseLDefault = -1;
+        this.mouthWidthDefault = 22;
+        this.mouthHeightDefault = 2;
         break;
       case 'listening':
         this.eyeLheightDefault = 38;
         this.eyeRheightDefault = 38;
         this.eyeLwidthDefault = 38;
         this.eyeRwidthDefault = 38;
+        this.browRaiseLDefault = -1;
+        this.browRaiseRDefault = -1;
+        this.mouthWidthDefault = 30;
+        this.mouthCurveDefault = 1;
         break;
       case 'speaking':
         this.speaking = true;
         this.eyeLheightDefault = 36;
         this.eyeRheightDefault = 36;
+        this.mouthWidthDefault = 36;
+        this.mouthCurveDefault = 1;
         break;
       case 'error':
         this.angry = true;
@@ -298,6 +408,10 @@ export class RoboEyes {
         this.hFlickerAmplitude = 3;
         this.eyeLheightDefault = 24;
         this.eyeRheightDefault = 24;
+        this.browTiltLDefault = 5;
+        this.browTiltRDefault = 5;
+        this.mouthWidthDefault = 28;
+        this.mouthCurveDefault = -2;
         break;
       // Newer emotions reuse the same eyelid/shape mechanics as their
       // nearest existing neighbor, at different magnitudes — this keeps
@@ -308,34 +422,55 @@ export class RoboEyes {
         this.happy = true;
         this.eyeLheightDefault = Math.round(30 + intensity * 3);
         this.eyeRheightDefault = Math.round(26 + intensity * 2);
+        this.browRaiseLDefault = -2;
+        this.mouthWidthDefault = 32;
+        this.mouthCurveDefault = 2;
         break;
       case 'proud':
         // Bigger, steadier happy — no curious/sideways drift.
         this.happy = true;
         this.eyeLheightDefault = Math.round(34 + intensity * 5);
         this.eyeRheightDefault = Math.round(34 + intensity * 5);
-        this.eyeLborderRadiusDefault = 10;
-        this.eyeRborderRadiusDefault = 10;
+        this.eyeLborderRadiusDefault = 18;
+        this.eyeRborderRadiusDefault = 18;
+        this.browRaiseLDefault = -1;
+        this.browRaiseRDefault = -1;
+        this.mouthWidthDefault = 40;
+        this.mouthHeightDefault = 4;
+        this.mouthCurveDefault = 2;
         break;
       case 'bored':
         // Droopy like sleepy, but not fully closed.
         this.tired = true;
         this.eyeLheightDefault = Math.round(18 - intensity * 4);
         this.eyeRheightDefault = Math.round(18 - intensity * 4);
+        this.browRaiseLDefault = 1;
+        this.browRaiseRDefault = 1;
+        this.mouthWidthDefault = 22;
+        this.mouthCurveDefault = -1;
         break;
       case 'annoyed':
         // Milder angry — same mechanic, smaller size reduction.
         this.angry = true;
         this.eyeLheightDefault = Math.round(28 + (1 - intensity) * 4);
         this.eyeRheightDefault = Math.round(28 + (1 - intensity) * 4);
+        this.browTiltLDefault = 2;
+        this.browTiltRDefault = 2;
+        this.mouthWidthDefault = 30;
+        this.mouthCurveDefault = -1;
         break;
       case 'skeptical':
         // Sharper asymmetric version of curious — one eye narrows more.
         this.curious = true;
         this.eyeLheightDefault = 34;
         this.eyeRheightDefault = 22;
-        this.eyeLborderRadiusDefault = 8;
-        this.eyeRborderRadiusDefault = 6;
+        this.eyeLborderRadiusDefault = 13;
+        this.eyeRborderRadiusDefault = 9;
+        this.browRaiseLDefault = -3;
+        this.browTiltRDefault = 2;
+        this.browRaiseRDefault = 1;
+        this.mouthWidthDefault = 26;
+        this.mouthCurveDefault = -1;
         break;
       case 'determined':
         // Bold and steady: centered, slightly squared-off corners.
@@ -343,6 +478,9 @@ export class RoboEyes {
         this.eyeRheightDefault = Math.round(32 + intensity * 4);
         this.eyeLborderRadiusDefault = 6;
         this.eyeRborderRadiusDefault = 6;
+        this.browTiltLDefault = 2;
+        this.browTiltRDefault = 2;
+        this.mouthWidthDefault = 38;
         break;
       case 'worried':
         // Between confused and sad — mild droop, gaze up (scanning for
@@ -350,6 +488,12 @@ export class RoboEyes {
         this.tired = true;
         this.eyeLheightDefault = Math.round(28 + (1 - intensity) * 4);
         this.eyeRheightDefault = Math.round(30 + (1 - intensity) * 4);
+        this.browTiltLDefault = -2;
+        this.browTiltRDefault = -2;
+        this.browRaiseLDefault = 1;
+        this.browRaiseRDefault = 1;
+        this.mouthWidthDefault = 28;
+        this.mouthCurveDefault = -2;
         break;
       case 'excited':
         // Bigger and rounder than surprised, with happy's smile curve.
@@ -360,6 +504,9 @@ export class RoboEyes {
         this.eyeRwidthDefault = 38;
         this.eyeLborderRadiusDefault = 16;
         this.eyeRborderRadiusDefault = 16;
+        this.browRaiseLDefault = -3;
+        this.browRaiseRDefault = -3;
+        this.mouthOpen = true;
         break;
       case 'neutral':
       default:
@@ -372,6 +519,14 @@ export class RoboEyes {
     this.eyeRwidthNext = this.eyeRwidthDefault;
     this.eyeLborderRadiusNext = this.eyeLborderRadiusDefault;
     this.eyeRborderRadiusNext = this.eyeRborderRadiusDefault;
+
+    this.browTiltLNext = this.browTiltLDefault;
+    this.browTiltRNext = this.browTiltRDefault;
+    this.browRaiseLNext = this.browRaiseLDefault;
+    this.browRaiseRNext = this.browRaiseRDefault;
+    this.mouthWidthNext = this.mouthWidthDefault;
+    this.mouthHeightNext = this.mouthHeightDefault;
+    this.mouthCurveNext = this.mouthCurveDefault;
   }
 
   blink() {
@@ -442,7 +597,7 @@ export class RoboEyes {
       const maxX = this.getScreenConstraintX();
       const maxY = this.getScreenConstraintY();
       this.eyeLxNext = Math.floor(Math.random() * maxX);
-      this.eyeLyNext = Math.floor(Math.random() * maxY);
+      this.eyeLyNext = this.eyeBandTop + Math.floor(Math.random() * maxY);
       this.nextIdleTime = now + this.idleInterval + Math.random() * this.idleIntervalVariation;
     }
 
@@ -472,6 +627,8 @@ export class RoboEyes {
         const pulse = this.speakingAmplitudeSmoothed * 10;
         this.eyeLheightNext = Math.max(12, this.eyeLheightDefault + pulse);
         this.eyeRheightNext = Math.max(12, this.eyeRheightDefault + pulse);
+        // Same signal drives the mouth "opening" with loudness.
+        this.mouthHeightNext = this.mouthHeightDefault + this.speakingAmplitudeSmoothed * 6;
       } else {
         // No amplitude data yet (or a silent gap in speech) — fall back to
         // a gentle sine idle so the eyes don't go dead-still mid-utterance.
@@ -479,9 +636,11 @@ export class RoboEyes {
         const pulse = Math.sin(this.speakingPhase) * 2;
         this.eyeLheightNext = Math.max(12, this.eyeLheightDefault + pulse);
         this.eyeRheightNext = Math.max(12, this.eyeRheightDefault + pulse);
+        this.mouthHeightNext = Math.max(1, this.mouthHeightDefault + pulse * 0.5);
       }
     } else {
       this.speakingAmplitudeSmoothed = 0;
+      this.mouthHeightNext = this.mouthHeightDefault;
     }
 
     // 5. Thinking subtle pulse (overrides the idle breathing baseline while active)
@@ -576,11 +735,106 @@ export class RoboEyes {
     const halfHeight = this.eyeLheightCurrent / 2;
     this.eyelidsTiredHeightNext = this.tired ? halfHeight : 0;
     this.eyelidsAngryHeightNext = this.angry ? halfHeight : 0;
-    this.eyelidsHappyBottomOffsetNext = this.happy ? halfHeight : 0;
+    // Happy's bottom cut is a filled dome (quadratic curve), not the
+    // tired/angry diagonal slants above — a curved cut eating a full 50%
+    // of the eye reads very differently from a linear slant at the same
+    // height, and combined with the new glow halo (a hard black edge
+    // biting into a soft gradient) produced a large stark dome that looked
+    // like a rendering bug rather than a smile-squint. Capped much smaller.
+    this.eyelidsHappyBottomOffsetNext = this.happy ? this.eyeLheightCurrent * 0.22 : 0;
 
     this.eyelidsTiredHeight = (this.eyelidsTiredHeight + this.eyelidsTiredHeightNext) / 2;
     this.eyelidsAngryHeight = (this.eyelidsAngryHeight + this.eyelidsAngryHeightNext) / 2;
     this.eyelidsHappyBottomOffset = (this.eyelidsHappyBottomOffset + this.eyelidsHappyBottomOffsetNext) / 2;
+
+    // Eyebrows: same asymptotic lerp as everything else above.
+    this.browTiltLCurrent = (this.browTiltLCurrent + this.browTiltLNext) / 2;
+    this.browTiltRCurrent = (this.browTiltRCurrent + this.browTiltRNext) / 2;
+    this.browRaiseLCurrent = (this.browRaiseLCurrent + this.browRaiseLNext) / 2;
+    this.browRaiseRCurrent = (this.browRaiseRCurrent + this.browRaiseRNext) / 2;
+
+    // Mouth: same lerp.
+    this.mouthWidthCurrent = (this.mouthWidthCurrent + this.mouthWidthNext) / 2;
+    this.mouthCurveCurrent = (this.mouthCurveCurrent + this.mouthCurveNext) / 2;
+    this.mouthHeightCurrent = (this.mouthHeightCurrent + this.mouthHeightNext) / 2;
+  }
+
+  /** One eye's rounded-rect body: an explicit radial-gradient halo bloom
+   * (NOT ctx.shadowBlur — verified via a real headless-Chromium screenshot
+   * that shadowBlur silently renders as nothing in at least that engine
+   * configuration, producing a flat hard-edged shape with zero glow despite
+   * the shadow calls being present; a gradient fill has no such dependency
+   * and is guaranteed visible), plus a crisp core and a small brightened
+   * highlight on top. */
+  private drawEyeShape(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    r: number
+  ) {
+    const rx = Math.round(x);
+    const ry = Math.round(y);
+    const cx = rx + w / 2;
+    const cy = ry + h / 2;
+
+    // Soft halo bloom: radial gradient from a bright core fading fully
+    // transparent, filled over a square big enough that the fade-out is
+    // never visibly clipped.
+    const glowRadius = Math.max(w, h) * 0.7;
+    const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowRadius);
+    gradient.addColorStop(0, 'rgba(255, 255, 255, 0.45)');
+    gradient.addColorStop(0.5, 'rgba(255, 255, 255, 0.15)');
+    gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    ctx.save();
+    ctx.fillStyle = gradient;
+    ctx.fillRect(cx - glowRadius, cy - glowRadius, glowRadius * 2, glowRadius * 2);
+    ctx.restore();
+
+    // Crisp core.
+    ctx.save();
+    ctx.fillStyle = this.mainColor;
+    ctx.beginPath();
+    ctx.roundRect(rx, ry, w, h, r);
+    ctx.fill();
+    ctx.restore();
+
+    // Subtle top-left highlight — a small brighter patch to suggest a lit,
+    // slightly convex surface instead of a flat matte fill. Kept small and
+    // low-opacity so it reads as polish, not a distracting extra shape.
+    const hw = Math.max(2, Math.round(w * 0.35));
+    const hh = Math.max(2, Math.round(h * 0.3));
+    if (hw < w - 2 && hh < h - 2) {
+      ctx.save();
+      ctx.globalAlpha = 0.25;
+      ctx.fillStyle = '#FFFFFF';
+      ctx.beginPath();
+      ctx.roundRect(rx + Math.round(w * 0.14), ry + Math.round(h * 0.12), hw, hh, Math.round(hh / 2));
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  /** A rounded-capsule eyebrow, centered at (cx, cy), rotated by `angle`
+   * radians about that center — gives a clean tilt with fully rounded ends
+   * instead of a sharp-cornered trapezoid. */
+  private drawBrow(
+    ctx: CanvasRenderingContext2D,
+    cx: number,
+    cy: number,
+    w: number,
+    h: number,
+    angle: number
+  ) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    ctx.fillStyle = this.mainColor;
+    ctx.beginPath();
+    ctx.roundRect(-w / 2, -h / 2, w, h, h / 2);
+    ctx.fill();
+    ctx.restore();
   }
 
   draw(ctx: CanvasRenderingContext2D) {
@@ -623,24 +877,15 @@ export class RoboEyes {
     ctx.fillStyle = this.bgColor;
     ctx.fillRect(0, 0, this.screenWidth, this.screenHeight);
 
-    // 2. Draw eye bodies with rounded rects and soft OLED glow
-    ctx.save();
-    ctx.shadowColor = this.glowColor;
-    ctx.shadowBlur = 4;
-    ctx.fillStyle = this.mainColor;
-
-    // Left eye
-    ctx.beginPath();
-    ctx.roundRect(Math.round(lx), Math.round(ly), lw, lh, lr);
-    ctx.fill();
-
-    // Right eye
+    // 2. Draw eye bodies: a soft wide halo pass underneath, then a crisp
+    // core on top with a subtle brightened highlight — a flat fill + tiny
+    // 4px blur read as a plain lit rectangle; this reads as an actually
+    // luminous surface, closer to how a real glowing round-panel robot
+    // face (soft diffused light, not a hard-edged sticker) looks.
+    this.drawEyeShape(ctx, lx, ly, lw, lh, lr);
     if (!this.cyclops) {
-      ctx.beginPath();
-      ctx.roundRect(Math.round(rx), Math.round(ry), rw, rh, rr);
-      ctx.fill();
+      this.drawEyeShape(ctx, rx, ry, rw, rh, rr);
     }
-    ctx.restore();
 
     // 3. Eyelids clipping using background color
     ctx.fillStyle = this.bgColor;
@@ -700,7 +945,7 @@ export class RoboEyes {
       ctx.beginPath();
       ctx.moveTo(lx - 2, ly + lh + 2);
       ctx.lineTo(lx - 2, ly + lh - 1);
-      ctx.quadraticCurveTo(lx + lw / 2, ly + lh - ho - 6, lx + lw + 2, ly + lh - 1);
+      ctx.quadraticCurveTo(lx + lw / 2, ly + lh - ho - 2, lx + lw + 2, ly + lh - 1);
       ctx.lineTo(lx + lw + 2, ly + lh + 2);
       ctx.closePath();
       ctx.fill();
@@ -710,11 +955,96 @@ export class RoboEyes {
         ctx.beginPath();
         ctx.moveTo(rx - 2, ry + rh + 2);
         ctx.lineTo(rx - 2, ry + rh - 1);
-        ctx.quadraticCurveTo(rx + rw / 2, ry + rh - ho - 6, rx + rw + 2, ry + rh - 1);
+        ctx.quadraticCurveTo(rx + rw / 2, ry + rh - ho - 2, rx + rw + 2, ry + rh - 1);
         ctx.lineTo(rx + rw + 2, ry + rh + 2);
         ctx.closePath();
         ctx.fill();
       }
     }
+
+    // 4. Eyebrows: small rounded CAPSULES (full end-cap rounding, not a
+    // sharp-mitered polygon — a flat-ended trapezoid read as a blocky
+    // corner cut next to the eyes' soft pill shapes). Position tracks each
+    // eye's CURRENT top edge (ly/ry — not a fixed band anchor): anchoring
+    // to a fixed Y independent of the eye's actual rest position left a
+    // large, clearly disconnected gap whenever the eye's default Y (used
+    // to sit well below the reserved brow band) didn't match that anchor —
+    // confirmed by an actual screenshot, not just reasoning about it. A
+    // small fixed gap above the live eye edge keeps them visually attached
+    // regardless of the eye's current height/position, and still lets
+    // `browRaise` lift them further for surprised/excited on top of that.
+    this.drawBrow(
+      ctx,
+      lx + lw / 2,
+      ly - this.browGap - this.browHeight / 2 + this.browRaiseLCurrent,
+      lw * 0.85,
+      this.browHeight,
+      // Left brow: positive tilt lowers the inner (right) end, i.e. a
+      // clockwise rotation of the capsule.
+      Math.atan2(this.browTiltLCurrent, lw)
+    );
+    if (!this.cyclops) {
+      this.drawBrow(
+        ctx,
+        rx + rw / 2,
+        ry - this.browGap - this.browHeight / 2 + this.browRaiseRCurrent,
+        rw * 0.85,
+        this.browHeight,
+        // Right brow mirrors left: positive tilt lowers the inner (left)
+        // end, i.e. a counter-clockwise rotation.
+        -Math.atan2(this.browTiltRCurrent, rw)
+      );
+    }
+
+    // 5. Mouth: horizontally fixed/centered (doesn't track gaze — a mouth
+    // darting sideways with the eyes would look wrong), but Y tracks the
+    // eyes' actual current bottom edge with a small fixed gap, the same
+    // fix applied to the brows above and for the same reason: anchoring to
+    // the fixed reserved-band math instead left a large, visibly
+    // disconnected gap whenever the eyes' actual size/position (which
+    // varies a lot by emotion — 10px tall for sleepy, 46px for surprised)
+    // didn't match that fixed number. `mouthOpen` swaps in a small rounded
+    // square (surprised/excited) instead of the usual curved bar.
+    const mw = Math.max(1, Math.round(this.mouthWidthCurrent));
+    const mh = Math.max(1, Math.round(this.mouthHeightCurrent));
+    const mx = Math.round((this.screenWidth - mw) / 2);
+    const mouthGap = 4;
+    const eyesBottomAvg = (ly + lh + ry + rh) / 2;
+    // Clamp against the canvas edge: eye height varies hugely by emotion
+    // (surprised can push the eye bottom near the edge already), and the
+    // speaking pulse can add a few px to mh on top of that.
+    const my = Math.min(Math.round(eyesBottomAvg) + mouthGap, this.screenHeight - mh - 1);
+
+    ctx.save();
+    ctx.fillStyle = this.mainColor;
+
+    if (this.mouthOpen) {
+      const size = Math.max(mh, Math.round(mw * 0.35));
+      ctx.beginPath();
+      ctx.roundRect(Math.round((this.screenWidth - size) / 2), my - 1, size, size, Math.floor(size / 3));
+      ctx.fill();
+    } else {
+      // Same quadratic-curve technique as the happy eyelid crescent above,
+      // but filled as a bar rather than cut as a background mask: positive
+      // curve bows the whole bar into a "cup" (smile), negative into a
+      // "cap" (frown). End caps are rounded (arcTo) rather than square —
+      // a hard vertical corner next to a curved top/bottom edge read as a
+      // stray blocky notch rather than one clean shape.
+      const curve = this.mouthCurveCurrent;
+      const capR = Math.min(mh / 2, mw / 2);
+      ctx.beginPath();
+      ctx.moveTo(mx + capR, my);
+      ctx.quadraticCurveTo(mx + mw / 2, my + curve, mx + mw - capR, my);
+      ctx.arcTo(mx + mw, my, mx + mw, my + capR, capR);
+      ctx.lineTo(mx + mw, my + mh - capR);
+      ctx.arcTo(mx + mw, my + mh, mx + mw - capR, my + mh, capR);
+      ctx.quadraticCurveTo(mx + mw / 2, my + mh + curve, mx + capR, my + mh);
+      ctx.arcTo(mx, my + mh, mx, my + mh - capR, capR);
+      ctx.lineTo(mx, my + capR);
+      ctx.arcTo(mx, my, mx + capR, my, capR);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
   }
 }
