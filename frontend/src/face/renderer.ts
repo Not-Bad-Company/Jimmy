@@ -30,6 +30,20 @@ export class FaceRenderer {
     this.eyes = eyes;
     this.handleResize();
     window.addEventListener('resize', () => this.handleResize());
+
+    // The sidebar collapse/expand animates layout (margin-right transition,
+    // see style.css) over ~250ms, but the canvas's pixel buffer was only
+    // ever resized once, via a fixed setTimeout guess AFTER that animation
+    // supposedly finished. For the whole transition the buffer's aspect
+    // ratio didn't match the animating CSS box, so the browser stretched
+    // the rendered content non-uniformly to fill it — the eyes visibly
+    // squished during the toggle. A ResizeObserver tracks the actual
+    // layout box every frame the animation changes it, so the buffer stays
+    // in sync continuously instead of snapping into place at the end.
+    if (typeof ResizeObserver !== 'undefined') {
+      const observer = new ResizeObserver(() => this.handleResize());
+      observer.observe(canvas);
+    }
   }
 
   handleResize() {

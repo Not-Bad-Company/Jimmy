@@ -26,6 +26,100 @@ pub struct HealthResponse {
     pub tts_model: String,
 }
 
+/// Result of attempting to speak a reply. When the real text gets rejected
+/// by TTS, `override_*` carries the substituted rejection line — the
+/// caller must use these (not the original LLM text/emotion) for whatever
+/// it stores/displays/broadcasts, so what's shown never disagrees with what
+/// was actually spoken.
+struct TtsOutcome {
+    audio_base64: Option<String>,
+    latency_ms: u64,
+    segment_timings: Vec<SegmentTiming>,
+    override_text: Option<String>,
+    override_emotion: Option<RobotEmotion>,
+    override_intensity: Option<f32>,
+}
+
+/// Synthesizes a reply's segments. If that fails outright (safety
+/// moderation, provider error) it substitutes a random pre-rendered
+/// rejection line from `cache` instead of leaving the reply mute — cached
+/// because these are fixed text with no reason to burn a network call/TTS
+/// usage on them per failure (see `ai::rejection`). If the cache is empty
+/// (e.g. it failed to warm at startup), falls back further to synthesizing
+/// one on demand as a last resort.
+async fn synthesize_with_fallback(
+    tts: &dyn crate::ai::tts::TTSProvider,
+    cache: &crate::ai::RejectionLineCache,
+    segments: &[crate::ai::llm::EmotionSegment],
+) -> TtsOutcome {
+    use base64::Engine;
+
+    if let Ok((tts_out, timings)) = tts.synthesize_segments(segments).await {
+        return TtsOutcome {
+            audio_base64: Some(
+                base64::engine::general_purpose::STANDARD.encode(&tts_out.audio_bytes),
+            ),
+            latency_ms: tts_out.latency_ms,
+            segment_timings: timings,
+            override_text: None,
+            override_emotion: None,
+            override_intensity: None,
+        };
+    }
+
+    warn!("TTS synthesis error, substituting a rejection line");
+
+    if let Some(line) = cache.pick() {
+        return TtsOutcome {
+            audio_base64: Some(line.audio_base64.clone()),
+            latency_ms: 0,
+            segment_timings: vec![SegmentTiming {
+                start_ms: 0,
+                duration_ms: line.duration_ms,
+                emotion: line.emotion,
+                intensity: line.intensity,
+            }],
+            override_text: Some(line.text.to_string()),
+            override_emotion: Some(line.emotion),
+            override_intensity: Some(line.intensity),
+        };
+    }
+
+    warn!("Rejection-line cache empty, synthesizing a fallback on demand");
+    let (text, emotion, intensity) = crate::ai::rejection::REJECTION_LINES[0];
+    let fallback_segment = crate::ai::llm::EmotionSegment {
+        text: text.to_string(),
+        emotion,
+        intensity,
+    };
+    match tts
+        .synthesize_segments(std::slice::from_ref(&fallback_segment))
+        .await
+    {
+        Ok((tts_out, timings)) => TtsOutcome {
+            audio_base64: Some(
+                base64::engine::general_purpose::STANDARD.encode(&tts_out.audio_bytes),
+            ),
+            latency_ms: tts_out.latency_ms,
+            segment_timings: timings,
+            override_text: Some(text.to_string()),
+            override_emotion: Some(emotion),
+            override_intensity: Some(intensity),
+        },
+        Err(e2) => {
+            warn!("Fallback TTS also failed (will continue without audio): {}", e2);
+            TtsOutcome {
+                audio_base64: None,
+                latency_ms: 0,
+                segment_timings: Vec::new(),
+                override_text: None,
+                override_emotion: None,
+                override_intensity: None,
+            }
+        }
+    }
+}
+
 pub async fn health_handler(State(state): State<AppState>) -> Json<HealthResponse> {
     let llm_healthy = state.llm.check_health().await;
     let stt_healthy = state.stt.check_health().await;
@@ -183,49 +277,54 @@ pub async fn chat_handler(
         }
     };
 
-    // 5. Store Rocky's response
-    state
-        .conversation
-        .add_message("assistant", &llm_res.text, Some(llm_res.emotion))
-        .await;
-
-    // 6. Optional TTS synthesis. This runs BEFORE the Speaking state
-    // broadcast (below) — synthesis alone was measured at 0.6-1.5s, and
-    // broadcasting "Speaking" before the audio bytes even exist told
-    // clients' eyes to start the speaking animation a full TTS-generation
-    // window ahead of any audio actually being playable. Clients still
-    // decode the transferred audio before it's truly audible (handled
-    // client-side via the real playback-start event), but this removes the
-    // much larger synthesis-time gap.
+    // 5. Optional TTS synthesis. This runs BEFORE storing/broadcasting the
+    // response (below) — a TTS rejection substitutes a rejection line (see
+    // `synthesize_with_fallback`), and what's stored in conversation
+    // history / broadcast / returned to the client must reflect what Jimmy
+    // actually said, not the original (possibly rejected) LLM text, or the
+    // transcript and the audio would disagree.
     let mut audio_base64 = None;
     let mut tts_latency_ms = 0u64;
     let mut segment_timings: Vec<SegmentTiming> = Vec::new();
+    let mut final_text = llm_res.text;
+    let mut final_emotion = llm_res.emotion;
+    let mut final_intensity = llm_res.intensity;
+    let final_gaze = llm_res.gaze;
 
     if req.synthesize_audio.unwrap_or(true) && !llm_res.segments.is_empty() {
-        match state.tts.synthesize_segments(&llm_res.segments).await {
-            Ok((tts_out, timings)) => {
-                use base64::Engine;
-                tts_latency_ms = tts_out.latency_ms;
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&tts_out.audio_bytes);
-                audio_base64 = Some(b64);
-                segment_timings = timings;
-            }
-            Err(e) => {
-                warn!("TTS synthesis error (will continue without audio): {}", e);
-            }
+        let outcome =
+            synthesize_with_fallback(state.tts.as_ref(), &state.rejection_cache, &llm_res.segments)
+                .await;
+        audio_base64 = outcome.audio_base64;
+        tts_latency_ms = outcome.latency_ms;
+        segment_timings = outcome.segment_timings;
+        if let Some(text) = outcome.override_text {
+            final_text = text;
+            final_emotion = outcome.override_emotion.unwrap_or(final_emotion);
+            final_intensity = outcome.override_intensity.unwrap_or(final_intensity);
         }
     }
 
-    // 7. Transition to Speaking with emotion, now that audio (if any) is
-    // actually ready to send.
+    // 6. Store the response actually spoken (see note above).
     state
-        .state_machine
-        .set_speaking(
-            Some(llm_res.emotion),
-            Some(llm_res.intensity),
-            Some(llm_res.gaze),
-        )
+        .conversation
+        .add_message("assistant", &final_text, Some(final_emotion))
         .await;
+
+    // 7. Transition to Speaking only if there's actually audio to play. TTS
+    // can fail (provider rejects the text, network error, etc.) — broadcasting
+    // Speaking unconditionally told every WS client (not just the one that
+    // made this request) to start the speaking animation, and since no audio
+    // ever plays, nothing ever sends `speech_finished` to clear it: the UI
+    // was left glitching in a permanent "talking" pose over silence.
+    if audio_base64.is_some() {
+        state
+            .state_machine
+            .set_speaking(Some(final_emotion), Some(final_intensity), Some(final_gaze))
+            .await;
+    } else {
+        state.state_machine.set_idle().await;
+    }
 
     let total_pipeline_ms = pipeline_start.elapsed().as_millis() as u64;
 
@@ -243,16 +342,16 @@ pub async fn chat_handler(
         event_type: "response_complete".to_string(),
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
         emotion_state: state.state_machine.get_state().await,
-        text: Some(llm_res.text.clone()),
+        text: Some(final_text.clone()),
         audio_url: None,
         latency: serde_json::to_value(&latency).ok(),
     });
 
     Ok(Json(ChatResponse {
-        message: llm_res.text,
-        emotion: llm_res.emotion,
-        intensity: llm_res.intensity,
-        gaze: llm_res.gaze,
+        message: final_text,
+        emotion: final_emotion,
+        intensity: final_intensity,
+        gaze: final_gaze,
         audio_base64,
         segments: segment_timings,
         latency,
@@ -380,44 +479,49 @@ pub async fn voice_turn_handler(
         }
     };
 
-    // 6. Record assistant response
-    state
-        .conversation
-        .add_message("assistant", &llm_res.text, Some(llm_res.emotion))
-        .await;
-
-    // 7. TTS Synthesis. Runs BEFORE the Speaking state broadcast below — see
-    // the matching comment in handle_chat() for why (broadcasting Speaking
-    // before audio exists made the eyes start their speaking animation a
-    // full TTS-generation window ahead of any audio being playable).
+    // 6. TTS Synthesis, BEFORE recording/broadcasting the response (see the
+    // matching comment in chat_handler() — a TTS rejection substitutes a
+    // rejection line, and stored/broadcast/returned text must match what
+    // was actually spoken).
     let mut audio_base64 = None;
     let mut tts_latency = 0u64;
     let mut segment_timings: Vec<SegmentTiming> = Vec::new();
+    let mut final_text = llm_res.text;
+    let mut final_emotion = llm_res.emotion;
+    let mut final_intensity = llm_res.intensity;
+    let final_gaze = llm_res.gaze;
 
     if !llm_res.segments.is_empty() {
-        match state.tts.synthesize_segments(&llm_res.segments).await {
-            Ok((tts_out, timings)) => {
-                use base64::Engine;
-                tts_latency = tts_out.latency_ms;
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&tts_out.audio_bytes);
-                audio_base64 = Some(b64);
-                segment_timings = timings;
-            }
-            Err(e) => {
-                warn!("TTS synthesis failed in voice turn: {}", e);
-            }
+        let outcome =
+            synthesize_with_fallback(state.tts.as_ref(), &state.rejection_cache, &llm_res.segments)
+                .await;
+        audio_base64 = outcome.audio_base64;
+        tts_latency = outcome.latency_ms;
+        segment_timings = outcome.segment_timings;
+        if let Some(text) = outcome.override_text {
+            final_text = text;
+            final_emotion = outcome.override_emotion.unwrap_or(final_emotion);
+            final_intensity = outcome.override_intensity.unwrap_or(final_intensity);
         }
     }
 
-    // 8. Transition to Speaking, now that audio (if any) is actually ready.
+    // 7. Record the response actually spoken.
     state
-        .state_machine
-        .set_speaking(
-            Some(llm_res.emotion),
-            Some(llm_res.intensity),
-            Some(llm_res.gaze),
-        )
+        .conversation
+        .add_message("assistant", &final_text, Some(final_emotion))
         .await;
+
+    // 8. Transition to Speaking only if there's actually audio to play — see
+    // the matching comment in chat_handler() for why (TTS failure must not
+    // leave clients stuck animating speech over silence).
+    if audio_base64.is_some() {
+        state
+            .state_machine
+            .set_speaking(Some(final_emotion), Some(final_intensity), Some(final_gaze))
+            .await;
+    } else {
+        state.state_machine.set_idle().await;
+    }
 
     let total_ms = pipeline_start.elapsed().as_millis() as u64;
 
@@ -434,16 +538,16 @@ pub async fn voice_turn_handler(
         event_type: "response_complete".to_string(),
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
         emotion_state: state.state_machine.get_state().await,
-        text: Some(llm_res.text.clone()),
+        text: Some(final_text.clone()),
         audio_url: None,
         latency: serde_json::to_value(&latency).ok(),
     });
 
     Ok(Json(ChatResponse {
-        message: llm_res.text,
-        emotion: llm_res.emotion,
-        intensity: llm_res.intensity,
-        gaze: llm_res.gaze,
+        message: final_text,
+        emotion: final_emotion,
+        intensity: final_intensity,
+        gaze: final_gaze,
         audio_base64,
         segments: segment_timings,
         latency,

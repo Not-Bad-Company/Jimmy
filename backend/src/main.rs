@@ -78,7 +78,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let app_state = AppState::new(config.clone(), system_prompt);
+    let mut app_state = AppState::new(config.clone(), system_prompt);
+    info!("Pre-rendering TTS rejection-line fallback pool...");
+    app_state.warm_rejection_cache().await;
 
     // Configure CORS
     let cors = CorsLayer::new()

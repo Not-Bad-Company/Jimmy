@@ -536,8 +536,17 @@ export class RoboEyes {
     }
 
     // 7. Smooth asymptotic lerping (RoboEyes mathematical core)
-    this.eyeLheightCurrent = (this.eyeLheightCurrent + this.eyeLheightNext + this.eyeLheightOffset) / 2;
-    this.eyeRheightCurrent = (this.eyeRheightCurrent + this.eyeRheightNext + this.eyeRheightOffset) / 2;
+    // The breathing/emotion height offset must NOT apply while a blink is
+    // closing the eye (eyeLheightNext/eyeRheightNext == 1) — this formula's
+    // steady state is `next + offset`, so a positive offset (happy/curious
+    // idle, or breathing mid-upswing) kept the closed target above the <=2
+    // reopen threshold and the blink never fully closed, instead flickering
+    // at a few px for a frame or two before the next state change forcibly
+    // reset it. That read as an unpolished glitch rather than a clean blink.
+    const heightOffsetL = this.eyeLheightNext <= 2 ? 0 : this.eyeLheightOffset;
+    const heightOffsetR = this.eyeRheightNext <= 2 ? 0 : this.eyeRheightOffset;
+    this.eyeLheightCurrent = (this.eyeLheightCurrent + this.eyeLheightNext + heightOffsetL) / 2;
+    this.eyeRheightCurrent = (this.eyeRheightCurrent + this.eyeRheightNext + heightOffsetR) / 2;
 
     if (this.eyeL_open && this.eyeLheightCurrent <= 2) {
       this.eyeLheightNext = this.eyeLheightDefault;

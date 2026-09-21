@@ -399,10 +399,52 @@ impl MistralTTSProvider {
     }
 }
 
+/// Local, conservative pre-filter for text about to be sent to Mistral's
+/// Voxtral TTS endpoint. The endpoint's own moderation is undocumented
+/// beyond "content moderation is applied; a flagged request gets a 403"
+/// (confirmed against Mistral's docs directly — there is no request
+/// parameter to relax or disable it), and in practice a 403 was observed on
+/// wording as mundane as "slave" inside a clearly non-abusive sentence
+/// ("Jimmy not slave. Jimmy partner."). Rather than spend a network
+/// round-trip discovering that per reply, catch the categories a
+/// word-list-based moderator is most likely watching for BEFORE the call —
+/// a hit here never reaches the provider at all, so it can be handled
+/// locally (skip this segment, or fall back to a safe line) instead of
+/// surfacing as a mysterious silent failure downstream.
+fn is_flagged_for_tts(text: &str) -> bool {
+    const FLAGGED_WORDS: &[&str] = &[
+        // slavery / bondage
+        "slave", "slaves", "slavery", "enslave", "enslaved",
+        // violence / death
+        "kill", "killed", "killing", "murder", "murdered", "suicide", "rape", "torture",
+        // hate
+        "nazi", "genocide", "terrorist",
+        // weapons
+        "bomb", "explosive",
+        // drugs
+        "cocaine", "heroin", "meth",
+        // sexual
+        "sex", "porn", "nude",
+    ];
+    let lower = text.to_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    FLAGGED_WORDS.iter().any(|f| words.contains(f))
+}
+
 impl MistralTTSProvider {
     /// One `/v1/audio/speech` call, decoded to raw PCM + its format info.
     /// Shared by both the single-shot and per-segment synthesis paths.
     async fn synth_one_pcm(&self, text: &str, voice_id: &str) -> Result<(u32, u16, Vec<u8>)> {
+        if is_flagged_for_tts(text) {
+            anyhow::bail!(
+                "text flagged by local pre-filter, skipped the Mistral TTS call entirely: {:?}",
+                text
+            );
+        }
+
         let endpoint = format!("{}/audio/speech", self.base_url.trim_end_matches('/'));
         let payload = serde_json::json!({
             "model": self.model,
@@ -422,6 +464,17 @@ impl MistralTTSProvider {
         if !res.status().is_success() {
             let status = res.status();
             let err_text = res.text().await.unwrap_or_default();
+            if status.as_u16() == 403 {
+                // Distinctly logged (vs. a generic failure) so the local
+                // word list above can be grown from real-world misses —
+                // this is the provider's moderation catching something our
+                // pre-filter didn't.
+                anyhow::bail!(
+                    "Mistral TTS REJECTED by moderation (403) for text {:?}: {}",
+                    text,
+                    err_text
+                );
+            }
             anyhow::bail!("Mistral TTS synthesis failed ({}): {}", status, err_text);
         }
 
@@ -493,9 +546,30 @@ impl TTSProvider for MistralTTSProvider {
         let mut pcm_all: Vec<u8> = Vec::new();
         let mut timings = Vec::with_capacity(segments.len());
         let mut cursor_ms = 0u64;
+        let mut ok_count = 0usize;
+        let last_index = segments.len().saturating_sub(1);
 
-        for (seg, result) in segments.iter().zip(results.into_iter()) {
-            let (sr, ch, pcm) = result?;
+        for (i, (seg, result)) in segments.iter().zip(results.into_iter()).enumerate() {
+            // One segment failing (transient network error, an unusually
+            // short/edge-case line rejected by the provider, etc.) must not
+            // silence the whole reply — a single `?` here used to propagate
+            // the error and drop every other segment's already-synthesized
+            // audio too. Skip the failed segment and keep going; only bail
+            // if nothing came back at all.
+            let (sr, ch, pcm) = match result {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        "TTS segment {}/{} ({:?}) failed, skipping it: {}",
+                        i + 1,
+                        segments.len(),
+                        seg.emotion,
+                        e
+                    );
+                    continue;
+                }
+            };
+            ok_count += 1;
             sample_rate = sr;
             channels = ch;
             let bytes_per_sample = 2u64 * ch as u64;
@@ -508,6 +582,28 @@ impl TTSProvider for MistralTTSProvider {
             });
             cursor_ms += duration_ms;
             pcm_all.extend_from_slice(&pcm);
+
+            // Insert real silence between segments so an emotion switch
+            // (e.g. angry -> neutral) doesn't cut straight into the next
+            // line with zero gap, which read as unnaturally abrupt. Longer
+            // pause when the emotion actually changes; a short beat even
+            // when it doesn't, matching a natural mid-thought pause.
+            if i < last_index {
+                let next_emotion = segments[i + 1].emotion;
+                let base_pause = SpeechProfile::from_emotion(seg.emotion, seg.intensity).sentence_pause;
+                let pause_s = if next_emotion != seg.emotion {
+                    base_pause.max(0.3)
+                } else {
+                    base_pause * 0.5
+                };
+                let silence_samples = (pause_s * sample_rate as f32) as usize * channels as usize;
+                pcm_all.resize(pcm_all.len() + silence_samples * 2, 0);
+                cursor_ms += (pause_s * 1000.0) as u64;
+            }
+        }
+
+        if ok_count == 0 {
+            anyhow::bail!("all {} TTS segments failed", segments.len());
         }
 
         let audio_bytes = build_wav(sample_rate, channels, &pcm_all);
@@ -636,5 +732,30 @@ impl TTSProvider for MockTTSProvider {
 
     fn default_voice(&self) -> &str {
         &self.default_voice
+    }
+}
+
+#[cfg(test)]
+mod tts_filter_tests {
+    use super::*;
+
+    #[test]
+    fn flags_word_observed_to_trigger_mistral_moderation() {
+        assert!(is_flagged_for_tts("Jimmy not slave. Jimmy partner."));
+    }
+
+    #[test]
+    fn does_not_flag_ordinary_in_character_lines() {
+        assert!(!is_flagged_for_tts("Bad idea. Bad, bad."));
+        assert!(!is_flagged_for_tts("Hello. Me Jimmy. What we do?"));
+        assert!(!is_flagged_for_tts("Hm. Jimmy cannot say that."));
+    }
+
+    #[test]
+    fn matches_whole_words_only() {
+        // Word-boundary matching, not substring — "classroom" must not
+        // false-positive just because some flagged word were a substring
+        // of it.
+        assert!(!is_flagged_for_tts("classroom assignment"));
     }
 }

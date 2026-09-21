@@ -4,7 +4,7 @@ use tokio::sync::RwLock;
 use crate::ai::{
     FasterWhisperProvider, LLMProvider, MistralSTTProvider, MistralTTSProvider,
     OpenAICompatibleProvider, LocalTTSProvider, MockLLMProvider, MockSTTProvider, MockTTSProvider,
-    STTProvider, TTSProvider,
+    RejectionLineCache, STTProvider, TTSProvider,
 };
 use crate::config::AppConfig;
 use crate::conversation::ConversationStore;
@@ -19,6 +19,11 @@ pub struct AppState {
     pub stt: Arc<dyn STTProvider>,
     pub tts: Arc<dyn TTSProvider>,
     pub system_prompt: Arc<String>,
+    /// Pre-rendered "no"/"not saying that" style lines used when the real
+    /// reply's TTS gets rejected — populated once via `warm_rejection_cache`
+    /// after construction (it needs `.await`, `new()` doesn't), empty until
+    /// then. See `ai::rejection`.
+    pub rejection_cache: Arc<RejectionLineCache>,
 }
 
 impl AppState {
@@ -99,6 +104,14 @@ impl AppState {
             stt,
             tts,
             system_prompt: Arc::new(system_prompt),
+            rejection_cache: Arc::new(RejectionLineCache::default()),
         }
+    }
+
+    /// Pre-synthesizes the rejection-line pool via the real TTS provider.
+    /// Separate from `new()` because it needs network I/O — call once at
+    /// startup, before serving requests.
+    pub async fn warm_rejection_cache(&mut self) {
+        self.rejection_cache = Arc::new(RejectionLineCache::warm(self.tts.as_ref()).await);
     }
 }
