@@ -15,6 +15,7 @@ mod api;
 mod config;
 mod conversation;
 mod robot;
+mod speaker;
 mod state;
 
 use api::{
