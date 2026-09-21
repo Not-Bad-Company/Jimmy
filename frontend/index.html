@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rocky — Autonomous Robotic Companion</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div class="app-container">
+      <!-- Header -->
+      <header class="app-header">
+        <div class="brand">
+          <span class="brand-title">ROCKY // 0.1</span>
+          <span id="connectionBadge" class="status-badge">
+            <span id="connectionDot" class="status-dot disconnected"></span>
+            <span id="connectionText">DISCONNECTED</span>
+          </span>
+        </div>
+        <button id="devToggle" class="dev-panel-toggle">
+          <span>⚙ DEVELOPER</span>
+        </button>
+      </header>
+
+      <!-- Face Stage (Dominates Interface) -->
+      <main class="face-stage">
+        <canvas id="faceCanvas"></canvas>
+        <div class="robot-state-banner">
+          <span class="state-pill" id="stateLabel">IDLE</span>
+          <span>•</span>
+          <span id="emotionLabel">NEUTRAL</span>
+        </div>
+      </main>
+
+      <!-- Transcript Section -->
+      <section class="transcript-section">
+        <div class="transcript-header">
+          <span>NEURAL TRANSCRIPT LOG</span>
+          <span id="tokenCountLabel">0 TOKENS</span>
+        </div>
+        <div id="transcriptScroll" class="transcript-scroll">
+          <!-- Messages dynamically injected -->
+        </div>
+      </section>
+
+      <!-- Interaction Bar -->
+      <div class="interaction-bar">
+        <button id="btnMic" class="btn-mic" title="Push-to-Talk (Hold or Click)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
+            <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
+          </svg>
+          <span id="micLabel">PUSH TO TALK</span>
+        </button>
+
+        <form id="chatForm" class="chat-input-wrapper">
+          <input
+            type="text"
+            id="chatInput"
+            class="chat-input"
+            placeholder="Type transmission to Rocky (fallback)..."
+            autocomplete="off"
+          />
+          <button type="submit" id="btnSend" class="btn-send">TRANSMIT</button>
+        </form>
+      </div>
+
+      <!-- Secondary Developer Panel -->
+      <section id="devPanel" class="dev-panel">
+        <div class="dev-panel-grid">
+          <div class="metric-card">
+            <span class="metric-label">STT Latency</span>
+            <span id="metricStt" class="metric-value">-- ms</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">LLM First Token</span>
+            <span id="metricFirstToken" class="metric-value">-- ms</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">LLM Total Latency</span>
+            <span id="metricLlmTotal" class="metric-value">-- ms</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">TTS Latency</span>
+            <span id="metricTts" class="metric-value">-- ms</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Total Pipeline</span>
+            <span id="metricTotal" class="metric-value">-- ms</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Local Model</span>
+            <span id="metricModel" class="metric-value">qwen2.5:3b</span>
+          </div>
+        </div>
+
+        <div class="dev-controls-row">
+          <span style="color: var(--text-muted); font-size: 0.7rem;">MANUAL OVERRIDE:</span>
+          <button class="btn-dev" data-emotion="happy">Happy</button>
+          <button class="btn-dev" data-emotion="curious">Curious</button>
+          <button class="btn-dev" data-emotion="angry">Angry</button>
+          <button class="btn-dev" data-emotion="surprised">Surprised</button>
+          <button class="btn-dev" data-emotion="confused">Confused</button>
+          <button class="btn-dev" data-emotion="sleepy">Sleepy</button>
+          <button class="btn-dev" data-emotion="neutral">Neutral</button>
+          <button class="btn-dev" id="btnDevBlink">Blink</button>
+          <button class="btn-dev" data-gaze="up">Look Up</button>
+          <button class="btn-dev" data-gaze="left">Look Left</button>
+          <button class="btn-dev" data-gaze="right">Look Right</button>
+          <button class="btn-dev" data-gaze="center">Center</button>
+          <button class="btn-dev" id="btnClearChat">Clear Log</button>
+        </div>
+      </section>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
